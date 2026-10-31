@@ -43,6 +43,7 @@ The LAN access code is a credential; never commit it. Read from `$P2S_ACCESS_COD
 - `control.py {stop|pause|resume|light_on|light_off}`
 - `cam.py {snap out.jpg | clip <secs> out.mp4}`
 - `clear_and_check.py`: stop and clear an error.
+- `estimate.py parts.toml`: sliced filament estimates and a print-requirements table for a project (format in the docstring).
 
 ## Printer quirks
 
