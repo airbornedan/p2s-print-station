@@ -49,7 +49,7 @@ smtp_password = "..."
 
 ## Remote monitoring (optional)
 
-Timed, password-protected `https://<server>/printer/` via reverse SSH tunnel. Remote can monitor, pause, resume, stop; not slice or start.
+Timed, password-protected `https://<server>/printer/` via reverse SSH tunnel. Remote can monitor, pause, resume, stop and skip parts; not slice or start.
 
 Server (Apache):
 1. `a2enmod proxy proxy_http headers`; add `IncludeOptional /etc/apache2/printer-remote/*.conf` to the HTTPS vhost.

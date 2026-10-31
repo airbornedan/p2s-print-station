@@ -1,6 +1,6 @@
 """Print station — LAN web UI for the Bambu P2S.
 
-Monitor (status, cameras, pause/resume/stop/light) and Inbox (place, slice, preview, send & start).
+Monitor (status, cameras, pause/resume/stop/light, skip part) and Inbox (place, slice, preview, send & start).
 Control commands need the printer in LAN + Developer mode; pass the code:
     P2S_ACCESS_CODE=<lan code> python3 station.py
 then open http://<this-box>:8078/ on the LAN. Port 8079 (localhost only) is the remote listener for
@@ -19,6 +19,7 @@ import siteconf  # noqa: E402
 from plate_watchdog import PrintMonitor
 from status_cache import StatusCache
 from camera_relay import CameraHub, FFmpegReader, WebcamReader
+import parts as plate_parts
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "remote"))
 import printer_remote  # noqa: E402
@@ -95,11 +96,12 @@ def _mqtt_loop():
                 pass
 
 
-def _control(cmd):
-    """Send one control command on a short-lived connection; return (ok, reply)."""
+def _send_command(payload, wait=5):
+    """Publish one command on a short-lived connection; return the printer's reply to it ({} if none)."""
     reply = {}
     done = threading.Event()
     seq = p2s.sequence_id()
+    next(iter(payload.values()))["sequence_id"] = seq
 
     def on_msg(c, u, m):
         d = json.loads(m.payload)
@@ -109,6 +111,16 @@ def _control(cmd):
                 reply.update({"command": s.get("command"), "result": s.get("result")})
                 done.set()
 
+    c, sn = p2s.connect(on_msg)
+    c.loop_start()
+    p2s.request(c, sn, payload)
+    done.wait(wait)
+    c.loop_stop(); c.disconnect()
+    return reply
+
+
+def _control(cmd):
+    """Send one control command; return (ok, reply)."""
     payloads = {
         "stop":   {"print": {"command": "stop", "param": ""}},
         "pause":  {"print": {"command": "pause", "param": ""}},
@@ -120,13 +132,7 @@ def _control(cmd):
     }
     if cmd not in payloads:
         return False, {"error": "unknown command"}
-    payload = payloads[cmd]
-    next(iter(payload.values()))["sequence_id"] = seq
-    c, sn = p2s.connect(on_msg)
-    c.loop_start()
-    p2s.request(c, sn, payload)
-    done.wait(5)
-    c.loop_stop(); c.disconnect()
+    reply = _send_command(payloads[cmd])
     if not reply:
         return False, {"error": "no acknowledgement (printer may be in cloud mode; control needs LAN + Developer)"}
     return (reply.get("result") or "").upper() == "SUCCESS", reply
@@ -176,10 +182,10 @@ app = Flask(__name__)
 
 # ---- remote access (<server>/printer/, switched by remote/printer_remote.py) ----------------
 # The droplet's Apache checks the IP allowlist and password and sets X-Print-Remote. Remote
-# viewers get monitor + pause/resume/stop/light only; everything else stays LAN-only.
+# viewers get monitor + pause/resume/stop/skip part/light only; everything else stays LAN-only.
 REMOTE_OK = {("GET", "/"), ("GET", "/cam.mjpeg"), ("GET", "/api/status"), ("GET", "/api/remote"),
              ("POST", "/api/remote/extend"), ("POST", "/api/control/pause"), ("POST", "/api/control/resume"),
-             ("POST", "/api/control/stop"), ("POST", "/api/control/light_on"), ("POST", "/api/control/light_off")}
+             ("POST", "/api/control/stop"), ("POST", "/api/skip"), ("POST", "/api/control/light_on"), ("POST", "/api/control/light_off")}
 
 
 def _is_remote():
@@ -291,6 +297,7 @@ def api_status():
         "lights": [l.get("mode") for l in (p.get("lights_report") or []) if l.get("node") == "chamber_light"],
         "print_error": p.get("print_error"), "speed": p.get("spd_lvl"), "ams": ams,
         "autoslow": _autoslow_get(),
+        "parts": _skip_view(p),
     }
     return jsonify(out)
 
@@ -426,6 +433,97 @@ def _autoslow_loop():
 def api_control(cmd):
     ok, reply = _control(cmd)
     return jsonify({"ok": ok, "reply": reply}), (200 if ok else 502)
+
+
+# ---- skip part: the running job's parts, read once per job from its file on the USB stick ----
+import ftps  # noqa: E402
+
+SKIPPABLE_STATES = {"RUNNING", "PAUSE"}
+PARTS_RETRY = 60   # seconds before retrying a failed fetch
+_parts = {"key": None, "parts": None, "busy": False, "retry_at": 0.0}
+_parts_lock = threading.Lock()
+
+
+def _job_key(p):
+    return (p.get("task_id"), p.get("subtask_name"), plate_parts.plate_number(p.get("gcode_file")))
+
+
+def _fetch_parts(key):
+    _, name, plate = key
+    dest = os.path.join(WORK, "running_job.gcode.3mf")
+    result, retry_at = None, 0.0
+    try:
+        os.makedirs(WORK, exist_ok=True)
+        ftps.download(name + ".gcode.3mf", dest, timeout=60)
+        result = plate_parts.read_parts(dest, plate) or []
+    except Exception as e:
+        print("skip part: can't read the job's parts:", type(e).__name__, e, file=sys.stderr, flush=True)
+        retry_at = time.time() + PARTS_RETRY
+    finally:
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+    with _parts_lock:
+        if _parts["key"] == key:
+            _parts.update(parts=result, busy=False, retry_at=retry_at)
+
+
+def _running_parts(p):
+    """Parts of the running or paused job ([{id, name, bbox}]), or None while unknown or not printing."""
+    if p.get("gcode_state") not in SKIPPABLE_STATES or not p.get("subtask_name"):
+        return None
+    key = _job_key(p)
+    with _parts_lock:
+        if _parts["key"] == key and (_parts["busy"] or _parts["parts"] is not None or time.time() < _parts["retry_at"]):
+            return _parts["parts"]
+        _parts.update(key=key, parts=None, busy=True, retry_at=0.0)
+    threading.Thread(target=_fetch_parts, args=(key,), daemon=True).start()
+    return None
+
+
+def _skip_view(p):
+    """Parts for the page, with skipped flags; None unless the job has two or more skippable parts."""
+    parts = _running_parts(p)
+    if not parts or len(parts) < 2:
+        return None
+    skipped = set(p.get("s_obj") or [])
+    return [dict(x, skipped=x["id"] in skipped) for x in parts]
+
+
+@app.post("/api/skip")
+def api_skip():
+    j = request.get_json(force=True, silent=True) or {}
+    ids = j.get("ids")
+    if not isinstance(ids, list) or not ids or not all(isinstance(i, int) and not isinstance(i, bool) for i in ids):
+        return jsonify({"ok": False, "error": "no parts chosen"}), 400
+    with _lock:
+        p = dict(_state["print"])
+    view = _skip_view(p)
+    if not view:
+        return jsonify({"ok": False, "error": "no multi-part print running"}), 409
+    live = {x["id"] for x in view if not x["skipped"]}
+    ids = sorted(set(ids))
+    if not set(ids) <= live:
+        return jsonify({"ok": False, "error": "unknown or already skipped part"}), 400
+    if set(ids) == live:
+        return jsonify({"ok": False, "error": "that would skip every part left; use Stop instead"}), 400
+    already = sorted(set(p.get("s_obj") or []))
+    reply = _send_command({"print": {"command": "skip_objects", "obj_list": already + ids}})
+    # The printer's skipped list (s_obj) is the proof; the command reply alone isn't.
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        if _conn["c"]:
+            p2s.request(_conn["c"], _conn["sn"], {"pushing": {"sequence_id": "0", "command": "pushall"}})
+        time.sleep(1.5)
+        with _lock:
+            now = set(_state["print"].get("s_obj") or [])
+        if set(ids) <= now:
+            return jsonify({"ok": True, "skipped": sorted(now), "reply": reply})
+    err = "printer did not confirm the skip"
+    if not reply:
+        err += " (no acknowledgement; control needs LAN + Developer mode)"
+    return jsonify({"ok": False, "error": err, "reply": reply}), 502
 
 
 def _sliced_info(path):
@@ -1016,6 +1114,11 @@ button.lit{background:#3a3620;border-color:var(--warn);color:#ffd98a}
 .seg button:last-child{border-radius:0 8px 8px 0}
 .seg button.on{background:#8c96a3;border-color:#8c96a3;color:#14171c}
 button:disabled{opacity:.4;cursor:default}
+#partmap{width:100%;max-width:260px;display:block;margin:0 auto 10px;background:#11151b;border:1px solid var(--line);border-radius:8px}
+#partmap rect{fill:#2a3140;stroke:var(--mut);stroke-width:1;cursor:pointer}
+#partmap rect.sel{fill:#5a2a30;stroke:var(--err)}#partmap rect.gone{fill:none;stroke-dasharray:4 3;cursor:default}
+#partmap text{fill:var(--fg);font-size:14px;text-anchor:middle;dominant-baseline:middle;pointer-events:none}
+.part{display:flex;align-items:center;gap:8px;padding:4px 0}.part.gone{color:var(--mut);text-decoration:line-through}
 .muted{color:var(--mut);font-size:13px}
 .err{color:var(--err);font-size:13px}
 .camhead{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
@@ -1088,7 +1191,7 @@ summary{cursor:pointer;color:var(--mut);font-size:13px;margin-bottom:10px}
   </nav>
   <span class="muted" id="linktxt"></span>
 </header>
-<div class="remotebar"><span>Remote view · monitor, pause and stop only</span>
+<div class="remotebar"><span>Remote view · monitor, pause, skip part and stop only</span>
   <span class="muted" id="remleft"></span><button id="extend">Extend 1 h</button></div>
 <div class="statusbar">
   <div class="card status">
@@ -1144,6 +1247,13 @@ summary{cursor:pointer;color:var(--mut);font-size:13px;margin-bottom:10px}
             <button data-lvl="4">Ludicrous</button>
           </div></div>
           <div class="muted" id="ctlmsg" style="margin-top:10px"></div>
+        </div>
+        <div class="card" id="partscard" style="display:none">
+          <div class="muted" style="margin-bottom:10px">Parts on this plate · pick the ones to skip</div>
+          <svg id="partmap" viewBox="0 0 256 256" aria-label="plate map"></svg>
+          <div id="parts"></div>
+          <div class="btns" style="margin-top:10px"><button id="skipbtn" class="stop" disabled>Skip selected</button></div>
+          <div class="muted" id="skipmsg" style="margin-top:8px"></div>
         </div>
         <div class="card">
           <div class="muted" style="margin-bottom:10px">AMS filament</div>
@@ -1207,7 +1317,62 @@ async function tick(){
   const lb=$('light'); lb.classList.toggle('lit',lightOn);
   lb.textContent=lightOn?'Light: on':'Light: off';
   document.querySelectorAll('#speed button').forEach(b=>b.classList.toggle('on',+b.dataset.lvl===d.speed));
+  showParts(d.parts);
 }
+
+// skip part: shown only while a multi-part job is running or paused (the server sends parts only then)
+let partSig='', skipSel=new Set(), skipArm=null;
+function showParts(parts){
+  const card=$('partscard');
+  if(!parts||parts.length<2){ card.style.display='none'; partSig=''; skipSel.clear(); return; }
+  card.style.display='';
+  const sig=parts.map(x=>x.id+(x.skipped?'s':'')).join(',');
+  if(sig===partSig) return;            // unchanged: keep the user's ticks
+  partSig=sig;
+  parts.forEach(x=>{ if(x.skipped) skipSel.delete(x.id); });
+  const map=$('partmap'), list=$('parts'); map.innerHTML=''; list.innerHTML='';
+  const ns='http://www.w3.org/2000/svg';
+  parts.forEach((x,n)=>{
+    const num=n+1;
+    if(x.bbox){ const [x0,y0,x1,y1]=x.bbox;
+      const r=document.createElementNS(ns,'rect');
+      r.setAttribute('x',x0); r.setAttribute('y',256-y1); r.setAttribute('width',Math.max(x1-x0,2)); r.setAttribute('height',Math.max(y1-y0,2));
+      r.dataset.id=x.id; if(x.skipped) r.classList.add('gone');
+      else r.addEventListener('click',()=>togglePart(x.id));
+      map.appendChild(r);
+      const t=document.createElementNS(ns,'text'); t.setAttribute('x',(x0+x1)/2); t.setAttribute('y',256-(y0+y1)/2); t.textContent=num;
+      map.appendChild(t); }
+    const row=document.createElement('label'); row.className='part'+(x.skipped?' gone':'');
+    row.innerHTML='<input type="checkbox"'+(x.skipped?' disabled':'')+'> <b>'+num+'</b> '+esc(x.name)+(x.skipped?' · skipped':'');
+    const cb=row.querySelector('input'); cb.checked=skipSel.has(x.id); cb.dataset.id=x.id;
+    cb.addEventListener('change',()=>togglePart(x.id,cb.checked));
+    list.appendChild(row);
+  });
+  map.style.display=parts.some(x=>x.bbox)?'':'none';
+  syncSkip();
+}
+function togglePart(id,on){
+  if(on===undefined) on=!skipSel.has(id);
+  on?skipSel.add(id):skipSel.delete(id); syncSkip();
+}
+function syncSkip(){
+  document.querySelectorAll('#parts input').forEach(cb=>cb.checked=skipSel.has(+cb.dataset.id));
+  document.querySelectorAll('#partmap rect').forEach(r=>r.classList.toggle('sel',skipSel.has(+r.dataset.id)));
+  const b=$('skipbtn'); clearTimeout(skipArm); skipArm=null;
+  b.disabled=!skipSel.size; b.textContent=skipSel.size?('Skip '+skipSel.size+' part'+(skipSel.size>1?'s':'')):'Skip selected';
+}
+$('skipbtn').addEventListener('click',async()=>{
+  const b=$('skipbtn'), n=skipSel.size; if(!n) return;
+  if(!skipArm){ b.textContent='Confirm: skip '+n+' part'+(n>1?'s':'')+' (can\'t undo)';
+    skipArm=setTimeout(syncSkip,6000); return; }
+  clearTimeout(skipArm); skipArm=null; b.disabled=true; $('skipmsg').textContent='skipping…';
+  try{ const r=await (await fetch('api/skip',{method:'POST',headers:{'Content-Type':'application/json'},
+         body:JSON.stringify({ids:[...skipSel]})})).json();
+    $('skipmsg').textContent=r.ok?'✓ skipped':'✗ '+(r.error||'failed');
+    if(r.ok) skipSel.clear();
+  }catch(e){ $('skipmsg').textContent='✗ skip failed: '+e; }
+  partSig=''; syncSkip(); tick();
+});
 let lightOn=false;
 async function send(cmd,btn){
   $('ctlmsg').textContent='…'; btn.disabled=true;
