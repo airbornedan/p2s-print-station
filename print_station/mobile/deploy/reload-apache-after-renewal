@@ -1,0 +1,5 @@
+#!/bin/sh
+# Called by the existing Certbot renewal mechanism, only for this hostname.
+case " ${RENEWED_DOMAINS:-} " in
+  *" print.example.com "*) /usr/sbin/apache2ctl configtest && /usr/bin/systemctl reload apache2 ;;
+esac

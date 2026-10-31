@@ -1,0 +1,14 @@
+[Unit]
+Description=Bambu P2S print station
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Edit the path to your clone.
+WorkingDirectory=%h/print-station/print_station
+ExecStart=%h/.local/share/print_station/venv/bin/python station.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

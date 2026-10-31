@@ -1,0 +1,9 @@
+[Unit]
+Description=Print station remote tunnel to the web server (closes itself at expiry)
+
+[Service]
+EnvironmentFile=-%h/.config/print_station/env
+# Adjust the path to where you cloned the repository.
+ExecStart=/usr/bin/python3 %h/print-station/print_station/remote/printer_remote.py _tunnel
+Restart=on-failure
+RestartSec=10

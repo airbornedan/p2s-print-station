@@ -1,0 +1,37 @@
+# Copy to ~/.config/print_station/config.toml and edit. Omitted keys use these placeholders.
+# Don't commit the real file.
+
+# Printer
+printer_ip = "192.0.2.10"
+access_code = ""          # empty: use Bambu Studio's saved code or $P2S_ACCESS_CODE
+bambu_studio_conf = "~/.config/BambuStudio/BambuStudio.conf"   # printer serial is read here
+
+# Web UI
+port = 8078
+remote_port = 8079        # remote-only listener (tunnel end)
+inbox = "~/print_inbox"   # files offered for printing
+work_dir = "~/.local/share/print_station/work"
+state_dir = "~/.local/state/print_station"
+venv_python = "~/.local/share/print_station/venv/bin/python"
+
+# Slicer
+appimage = "~/applications/Bambu_Studio.AppImage"
+profiles_dir = "~/.local/share/print_station/bbl/squashfs-root/resources/profiles/BBL"
+
+# Second camera (optional): any MJPEG stream that sees the plate
+webcam_url = "http://192.0.2.20:8081"
+camera_width = 1280
+
+# Remote monitoring (optional)
+remote_admin = "root@203.0.113.10"          # runs printer-remote-ctl on the server
+tunnel_target = "tunnel@example.com"
+tunnel_key = "~/.ssh/id_tunnel"
+status_target = "printer-status@203.0.113.10"
+status_key = "~/.ssh/printer_status"
+
+# Phone app (optional)
+mobile_enabled = false
+mobile_origin = "https://print.example.com"
+
+# Email alerts (optional; holds a password, so a separate file)
+mail_config = "~/.config/print_station/mail.toml"
