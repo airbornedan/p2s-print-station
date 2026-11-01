@@ -23,6 +23,7 @@ DEFAULTS = {
     "profiles_dir": ("~/.local/share/print_station/bbl/squashfs-root/resources/profiles/BBL", None),
     "webcam_url": ("http://192.0.2.20:8081", "PRINT_STATION_WEBCAM"),
     "camera_width": (1280, "PRINT_STATION_CAM_W"),
+    "vibration_every": (12, None),
     "remote_admin": ("root@203.0.113.10", None),
     "tunnel_target": ("tunnel@example.com", None),
     "tunnel_key": ("~/.ssh/id_tunnel", None),

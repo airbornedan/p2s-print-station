@@ -24,6 +24,10 @@ def mapping(path):
     n = max([len(m.group(1).split()) if m else 0] + used)
     return [slot if i + 1 in used else -1 for i in range(n)]
 
+if local:
+    import gcodecheck
+    if gcodecheck.start_problems(local):
+        sys.exit(" ".join(gcodecheck.start_problems(local)))
 ams_mapping = mapping(local)
 ams_mapping2 = [{"ams_id": 0, "slot_id": s} if s >= 0 else {"ams_id": 255, "slot_id": 255} for s in ams_mapping]
 seq = p2s.sequence_id()

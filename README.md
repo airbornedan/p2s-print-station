@@ -31,6 +31,8 @@ cd ~/.local/share/print_station/bbl && <AppImage> --appimage-extract 'resources/
 Run: `cd ~/print-station/print_station && ~/.local/share/print_station/venv/bin/python station.py`, open `http://<host>:8078/`.
 As a service: `deploy/print-station.service` → `~/.config/systemd/user/`, then `systemctl --user enable --now print-station`.
 
+Vibration calibration runs on every 12th send (`vibration_every`), or when ticked on Send.
+
 Access code: from Bambu Studio's saved config, `$P2S_ACCESS_CODE`, or the page. It changes on cloud ↔ LAN switch.
 
 ## Email alerts
@@ -74,7 +76,7 @@ printer-remote off
 From `print_station/`:
 
 ```
-python -m unittest test_plate_watchdog test_printer_stage mobile.test_mobile mobile.test_push
+python -m unittest test_gcodecheck test_plate_watchdog test_printer_stage mobile.test_mobile mobile.test_push
 (cd json_status && python -m unittest discover -p 'test_*.py')
 ```
 

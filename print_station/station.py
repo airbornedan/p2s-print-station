@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools", "bambu"))
 import p2s  # noqa: E402
 import siteconf  # noqa: E402
+import gcodecheck  # noqa: E402
 from plate_watchdog import PrintMonitor
 from status_cache import StatusCache
 from camera_relay import CameraHub, FFmpegReader, WebcamReader
@@ -945,7 +946,7 @@ def _send_problems(path, slot, expect=None, fresh=False):
     with _lock:
         p = dict(_state["print"])
         connected, age = _state["connected"], time.time() - _state["updated"] if _state["updated"] else None
-    probs = []
+    probs = gcodecheck.start_problems(path)
     if not connected or age is None or age > 30:
         return probs + ["No fresh printer status (connected? current access code?)."]
     if not p.get("sdcard"):
@@ -1000,6 +1001,35 @@ def api_preview():
     return send_file(prev, mimetype="image/png")
 
 
+# Vibration calibration: every Nth send (successful or not), or when ticked; either resets the count.
+VIBE_FILE = os.path.join(siteconf.path("state_dir"), "vibration.json")
+
+
+def _vibe_sends():
+    try:
+        with open(VIBE_FILE) as f:
+            return int(json.load(f)["sends"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0
+
+
+def _vibe_take(ticked):
+    """Count this send; True if it should run the vibration calibration."""
+    n, every = _vibe_sends() + 1, int(siteconf.get("vibration_every"))
+    run = bool(ticked) or (every > 0 and n >= every)
+    os.makedirs(os.path.dirname(VIBE_FILE), exist_ok=True)
+    with open(VIBE_FILE, "w") as f:
+        json.dump({"sends": 0 if run else n}, f)
+    return run
+
+
+@app.get("/api/vibration")
+def api_vibration():
+    every = int(siteconf.get("vibration_every"))
+    return jsonify({"sends": _vibe_sends(), "every": every,
+                    "due": every > 0 and _vibe_sends() + 1 >= every})
+
+
 @app.post("/api/send")
 def api_send():
     # Either send what we just sliced (_pending), or a pre-sliced file straight from the inbox ({name, slot}).
@@ -1043,9 +1073,10 @@ def api_send():
             token = _print_monitor.expect(usb_name)
         except (OSError, RuntimeError) as exc:
             return jsonify({"ok": False, "error": "notification monitor not ready: " + str(exc)}), 503
+        vibration = _vibe_take(j.get("vibration"))
         try:
             st = subprocess.run([sys.executable, os.path.join(BAMBU, "start.py"), usb_name, str(slot), "--local", path]
-                                + (["--vibration"] if j.get("vibration") else []),
+                                + (["--vibration"] if vibration else []),
                                 capture_output=True, text=True, timeout=60, env=env, cwd=BAMBU)
         except subprocess.TimeoutExpired:
             _print_monitor.cancel(token)
@@ -1055,7 +1086,7 @@ def api_send():
             _print_monitor.cancel(token)
         if ok and slow_layer:
             _autoslow_set(usb_name.replace(".gcode.3mf", ""), slow_layer)
-        return jsonify({"ok": ok, "upload": up.stdout.strip(), "start": st.stdout.strip(),
+        return jsonify({"ok": ok, "upload": up.stdout.strip(), "start": st.stdout.strip(), "vibration": vibration,
                         "error": None if ok else "printer did not start: " + st.stdout.strip()}), (200 if ok else 502)
     except subprocess.TimeoutExpired:
         return jsonify({"ok": False, "error": "send timed out"}), 500
@@ -1491,7 +1522,7 @@ function detailSlicedHTML(it){
   return '<div class="muted" style="margin-bottom:12px">'+esc(it.name)+'</div>'+
     '<div class="field">'+(it.grams!=null?('<b>'+it.grams+' g</b> · ~'+it.minutes+' min — already sliced'):'already sliced')+'</div>'+
     '<div class="field"><label>Print from AMS slot</label>'+amsPickHTML()+'</div>'+
-    VIBE+'<button id="sendbtn" class="big">Send &amp; start</button>'+
+    vibeHTML()+'<button id="sendbtn" class="big">Send &amp; start</button>'+
     '<div id="sliceout" style="margin-top:10px"></div>';
 }
 
@@ -1535,14 +1566,19 @@ async function doSlice(name){
       (j.autoslow?'<label class="chk"><input type="checkbox" id="slowon"'+(j.autoslow.suggest?' checked':'')+'> Slow down above layer '+
         '<input type="number" id="slowlayer" min="2" value="'+j.autoslow.layer+'" style="width:80px"> '+
         '<span class="muted">(≈'+j.autoslow.z+' mm, outer wall slow throughout; part '+j.autoslow.height+' mm tall on a '+j.autoslow.width+' mm base)</span></label>':'')+
-      VIBE+'<button id="sendbtn" class="big">Send &amp; start</button>';
+      vibeHTML()+'<button id="sendbtn" class="big">Send &amp; start</button>';
     $('sendbtn').addEventListener('click',()=>doSend({slow_layer:($('slowon')&&$('slowon').checked)?+$('slowlayer').value:null, vibration:vibeOn()}));
   }catch(e){ out.innerHTML='<div class="chk-line bad">✕ '+esc(e)+'</div>'; }
   finally{ btn.disabled=false; }
 }
 
 // Vibration calibration: off by default (run it every 10-15 prints).
-const VIBE='<label class="chk"><input type="checkbox" id="vibe"> Vibration calibration</label>';
+let vibeInfo=null;
+async function vibeLoad(){ try{ vibeInfo=await (await fetch('api/vibration')).json(); }catch(e){} }
+vibeLoad();
+function vibeHTML(){ const v=vibeInfo, due=v&&v.due;
+  return '<label class="chk"><input type="checkbox" id="vibe"'+(due?' checked disabled':'')+'> Vibration calibration'+
+    (v&&v.every?' <span class="muted">('+(due?'due: every '+v.every+' sends':v.sends+' of '+v.every+' sends since last')+')</span>':'')+'</label>'; }
 function vibeOn(){ return !!($('vibe')&&$('vibe').checked); }
 async function doSend(body){
   const btn=$('sendbtn'), out=$('sliceout');
@@ -1558,7 +1594,7 @@ async function doSend(body){
     out.appendChild(line);
     if(j.ok) setTimeout(()=>{showTab('monitor');},1200);
   }catch(e){ const l=document.createElement('div'); l.className='chk-line bad'; l.textContent='✕ '+e; out.appendChild(l); }
-  finally{ btn.disabled=false; btn.textContent=prev; }
+  finally{ btn.disabled=false; btn.textContent=prev; vibeLoad(); }
 }
 
 async function loadProfiles(){

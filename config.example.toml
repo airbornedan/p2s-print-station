@@ -9,6 +9,7 @@ bambu_studio_conf = "~/.config/BambuStudio/BambuStudio.conf"   # printer serial 
 # Web UI
 port = 8078
 remote_port = 8079        # remote-only listener (tunnel end)
+vibration_every = 12      # vibration calibration runs on every Nth send (0 = only when ticked)
 inbox = "~/print_inbox"   # files offered for printing
 work_dir = "~/.local/share/print_station/work"
 state_dir = "~/.local/state/print_station"
