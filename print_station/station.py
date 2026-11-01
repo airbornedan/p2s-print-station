@@ -1044,7 +1044,8 @@ def api_send():
         except (OSError, RuntimeError) as exc:
             return jsonify({"ok": False, "error": "notification monitor not ready: " + str(exc)}), 503
         try:
-            st = subprocess.run([sys.executable, os.path.join(BAMBU, "start.py"), usb_name, str(slot), "--local", path],
+            st = subprocess.run([sys.executable, os.path.join(BAMBU, "start.py"), usb_name, str(slot), "--local", path]
+                                + (["--vibration"] if j.get("vibration") else []),
                                 capture_output=True, text=True, timeout=60, env=env, cwd=BAMBU)
         except subprocess.TimeoutExpired:
             _print_monitor.cancel(token)
@@ -1490,14 +1491,14 @@ function detailSlicedHTML(it){
   return '<div class="muted" style="margin-bottom:12px">'+esc(it.name)+'</div>'+
     '<div class="field">'+(it.grams!=null?('<b>'+it.grams+' g</b> · ~'+it.minutes+' min — already sliced'):'already sliced')+'</div>'+
     '<div class="field"><label>Print from AMS slot</label>'+amsPickHTML()+'</div>'+
-    '<button id="sendbtn" class="big">Send &amp; start</button>'+
+    VIBE+'<button id="sendbtn" class="big">Send &amp; start</button>'+
     '<div id="sliceout" style="margin-top:10px"></div>';
 }
 
 async function selectFile(it){
   const det=$('detail');
   if(it.kind==='sliced'){ det.innerHTML=detailSlicedHTML(it); wireAms();
-    $('sendbtn').addEventListener('click',()=>doSend({name:it.name, slot:selectedSlot()})); return; }
+    $('sendbtn').addEventListener('click',()=>doSend({name:it.name, slot:selectedSlot(), vibration:vibeOn()})); return; }
   curNozzle=((last.nozzle_size||'0.4')+'');
   det.innerHTML=detailModelHTML(it);
   wireAms();
@@ -1534,12 +1535,15 @@ async function doSlice(name){
       (j.autoslow?'<label class="chk"><input type="checkbox" id="slowon"'+(j.autoslow.suggest?' checked':'')+'> Slow down above layer '+
         '<input type="number" id="slowlayer" min="2" value="'+j.autoslow.layer+'" style="width:80px"> '+
         '<span class="muted">(≈'+j.autoslow.z+' mm, outer wall slow throughout; part '+j.autoslow.height+' mm tall on a '+j.autoslow.width+' mm base)</span></label>':'')+
-      '<button id="sendbtn" class="big">Send &amp; start</button>';
-    $('sendbtn').addEventListener('click',()=>doSend({slow_layer:($('slowon')&&$('slowon').checked)?+$('slowlayer').value:null}));
+      VIBE+'<button id="sendbtn" class="big">Send &amp; start</button>';
+    $('sendbtn').addEventListener('click',()=>doSend({slow_layer:($('slowon')&&$('slowon').checked)?+$('slowlayer').value:null, vibration:vibeOn()}));
   }catch(e){ out.innerHTML='<div class="chk-line bad">✕ '+esc(e)+'</div>'; }
   finally{ btn.disabled=false; }
 }
 
+// Vibration calibration: off by default (run it every 10-15 prints).
+const VIBE='<label class="chk"><input type="checkbox" id="vibe"> Vibration calibration</label>';
+function vibeOn(){ return !!($('vibe')&&$('vibe').checked); }
 async function doSend(body){
   const btn=$('sendbtn'), out=$('sliceout');
   if(body&&body.name&&body.slot==null){ out.innerHTML='<div class="chk-line bad">✕ pick an AMS slot first</div>'; return; }

@@ -1,12 +1,14 @@
 """Start a print of a .gcode.3mf already on the P2S USB stick. LAN + Developer mode only.
-    P2S_ACCESS_CODE=<code> python3 start.py <name.gcode.3mf> <ams_slot 0-3> [url] [--local <path to the same .gcode.3mf>]
-Maps the model filament to the given AMS slot; bed-level on, calibrations off for speed.
+    P2S_ACCESS_CODE=<code> python3 start.py <name.gcode.3mf> <ams_slot 0-3> [url] [--local <path to the same .gcode.3mf>] [--vibration]
+Maps the model filament to the given AMS slot; bed-level on; flow calibration off; vibration calibration only with --vibration.
 ams_mapping needs one entry per project filament (-1 = unused); with --local it is read from the
 file's slice_info, so a project with several filaments (model on filament 2 of 5) maps correctly.
 A file on the USB/SD card is addressed as ftp:///<name> (per OpenBambuAPI), NOT file:///sdcard/<name>."""
 import json, re, sys, time, zipfile, p2s
 args = sys.argv[1:]
 local = None
+vibration = "--vibration" in args
+args = [a for a in args if a != "--vibration"]
 if "--local" in args:
     i = args.index("--local"); local = args[i + 1]; del args[i:i + 2]
 name, slot = args[0], int(args[1])
@@ -29,7 +31,7 @@ payload = {"print": {"sequence_id": seq, "command": "project_file",
     "param": "Metadata/plate_1.gcode", "subtask_name": name.replace(".gcode.3mf", ""),
     "url": url, "md5": "", "file": "",
     "bed_type": "auto", "timelapse": False, "bed_leveling": True,
-    "flow_cali": False, "vibration_cali": True, "layer_inspect": False,
+    "flow_cali": False, "vibration_cali": vibration, "layer_inspect": False,
     "use_ams": True, "ams_mapping": ams_mapping, "ams_mapping2": ams_mapping2,
     "profile_id": "0", "project_id": "0", "subtask_id": "0", "task_id": "0"}}
 job = name.replace(".gcode.3mf", "")
