@@ -295,6 +295,7 @@ def api_status():
         "nozzle": p.get("nozzle_temper"), "nozzle_target": p.get("nozzle_target_temper"),
         "bed": p.get("bed_temper"), "bed_target": p.get("bed_target_temper"),
         "nozzle_size": p.get("nozzle_diameter"), "sdcard": p.get("sdcard"),
+        "usb_free_mb": _usb_free_mb(p), "recording": _recording_on(p),
         "lights": [l.get("mode") for l in (p.get("lights_report") or []) if l.get("node") == "chamber_light"],
         "print_error": p.get("print_error"), "speed": p.get("spd_lvl"), "ams": ams,
         "autoslow": _autoslow_get(),
@@ -935,6 +936,22 @@ def _tray_desc(t):
     return "empty" if not t or not t.get("type") else "%s %s #%s" % (t["type"], t.get("idx") or "?", t.get("color") or "?")
 
 
+USB_MARGIN_MB = 50                     # free space kept on the USB stick beyond the file being sent
+
+
+def _usb_free_mb(p):
+    """Free space on the printer's USB stick (MB) from the camera report, or None if not reported."""
+    try:
+        return int((p.get("ipcam") or {})["tl_external_free_kb"]) // 1024
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _recording_on(p):
+    """The printer records every print to the USB stick's ipcamera folder; that fills the stick."""
+    return (p.get("ipcam") or {}).get("ipcam_record") == "enable"
+
+
 def _send_problems(path, slot, expect=None, fresh=False):
     """Everything that should stop a send, as messages; empty means go.
     fresh: first get a new AMS report from the printer. expect: the slot's spool when it was sliced."""
@@ -951,6 +968,11 @@ def _send_problems(path, slot, expect=None, fresh=False):
         return probs + ["No fresh printer status (connected? current access code?)."]
     if not p.get("sdcard"):
         probs.append("No USB stick in the printer's screen-box port.")
+    else:
+        free, need = _usb_free_mb(p), os.path.getsize(path) // 2 ** 20 + 1 + USB_MARGIN_MB
+        if free is not None and free < need:
+            probs.append("USB stick nearly full: %d MB free, this job needs %d MB (with margin)%s." % (
+                free, need, "; printer video recording is on and fills it" if _recording_on(p) else ""))
     if p.get("gcode_state") not in SENDABLE_STATES:
         probs.append("Printer is busy (%s)." % p.get("gcode_state"))
     try:
@@ -1086,7 +1108,10 @@ def api_send():
             _print_monitor.cancel(token)
         if ok and slow_layer:
             _autoslow_set(usb_name.replace(".gcode.3mf", ""), slow_layer)
+        with _lock:
+            rec = _recording_on(_state["print"])
         return jsonify({"ok": ok, "upload": up.stdout.strip(), "start": st.stdout.strip(), "vibration": vibration,
+                        "warning": "Printer video recording is on; it fills the USB stick." if rec else None,
                         "error": None if ok else "printer did not start: " + st.stdout.strip()}), (200 if ok else 502)
     except subprocess.TimeoutExpired:
         return jsonify({"ok": False, "error": "send timed out"}), 500
@@ -1335,7 +1360,7 @@ async function tick(){
   $('noz').textContent=temps(d.nozzle,d.nozzle_target);
   $('bed').textContent=temps(d.bed,d.bed_target);
   $('nsz').textContent=d.nozzle_size?d.nozzle_size+' mm':'—';
-  $('usb').textContent=d.sdcard?'present':'none';
+  $('usb').textContent=!d.sdcard?'none':(d.usb_free_mb!=null?(d.usb_free_mb/1024).toFixed(1)+' GB free':'present')+(d.recording?' — video recording ON, fills the stick':'');
   const s=$('slots'); s.innerHTML='';
   (d.ams||[]).forEach(a=>{const row=document.createElement('div');row.className='slot';
     row.innerHTML='<span class="sw" style="background:'+(a.color||'#444')+'"></span>'+
@@ -1592,7 +1617,8 @@ async function doSend(body){
     line.className='chk-line '+(j.ok?'ok':'bad');
     line.textContent=(j.ok?'✓ Sent and started — see the Monitor tab':'✕ '+(j.error||j.start||'send failed'));
     out.appendChild(line);
-    if(j.ok) setTimeout(()=>{showTab('monitor');},1200);
+    if(j.warning){ const w=document.createElement('div'); w.className='chk-line bad'; w.textContent='⚠ '+j.warning; out.appendChild(w); }
+    if(j.ok) setTimeout(()=>{showTab('monitor');},j.warning?4000:1200);
   }catch(e){ const l=document.createElement('div'); l.className='chk-line bad'; l.textContent='✕ '+e; out.appendChild(l); }
   finally{ btn.disabled=false; btn.textContent=prev; vibeLoad(); }
 }
