@@ -32,6 +32,7 @@ DEFAULTS = {
     "mobile_enabled": (False, "PRINT_MOBILE_ENABLED"),
     "mobile_origin": ("https://print.example.com", "PRINT_MOBILE_ORIGIN"),
     "mail_config": ("~/.config/print_station/mail.toml", None),
+    "filament_overrides": ({}, None),   # {filament profile: {slicer key: value}}, applied on every slice
 }
 
 _file = None

@@ -802,6 +802,20 @@ def api_slice():
     proc_json = os.path.join(WORK, "process.json")
     with open(os.path.join(prof, process + ".json")) as f:
         pj = json.load(f)
+    # Site defaults for this filament (config.toml [filament_overrides."<profile>"]): filament keys go into
+    # the filament profile, anything else into the process profile.
+    fil_json = os.path.join(prof, filament + ".json")
+    fil_over = dict((siteconf.get("filament_overrides") or {}).get(filament, {}))
+    if fil_over:
+        with open(fil_json) as f:
+            fj = json.load(f)
+        for k, v in fil_over.items():
+            target = fj if k in fj else over
+            cur = target.get(k)
+            target[k] = [str(v)] * len(cur) if isinstance(cur, list) else str(v)
+        fil_json = os.path.join(WORK, "filament.json")
+        with open(fil_json, "w") as f:
+            json.dump(fj, f)
     pj.update(over)
     with open(proc_json, "w") as f:
         json.dump(pj, f)
@@ -816,7 +830,7 @@ def api_slice():
         os.remove(out)
     cmd = [APPIMAGE, "--slice", "0", "--arrange", arrange, "--orient", "0",
            "--load-settings", "%s;%s" % (os.path.join(prof, machine + ".json"), proc_json),
-           "--load-filaments", os.path.join(prof, filament + ".json"),
+           "--load-filaments", fil_json,
            "--export-3mf", out, stl]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
@@ -840,6 +854,8 @@ def api_slice():
 
     # pre-send checks
     checks = []
+    if fil_over:
+        checks.append({"ok": True, "msg": "Filament defaults: " + ", ".join("%s %s" % (k, v) for k, v in fil_over.items())})
     sliced_bbox = (_job_meta(out) or {}).get("bbox")
     if sliced_bbox:
         x0, y0, x1, y1 = sliced_bbox   # what the slicer actually lays down, brim included

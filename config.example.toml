@@ -36,3 +36,8 @@ mobile_origin = "https://print.example.com"
 
 # Email alerts (optional; holds a password, so a separate file)
 mail_config = "~/.config/print_station/mail.toml"
+
+# Per-filament slice defaults: filament profile -> slicer settings (filament or process keys).
+# [filament_overrides."Bambu PLA Basic @BBL P2S"]
+# nozzle_temperature = 210
+# reduce_crossing_wall = 1
