@@ -11,6 +11,7 @@ A single long-lived MQTT client keeps the latest report in memory, so the page p
 local endpoint and never waits on the printer.
 """
 import json, os, re, shutil, subprocess, sys, threading, time
+import urllib.request
 from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools", "bambu"))
@@ -18,9 +19,11 @@ import p2s  # noqa: E402
 import siteconf  # noqa: E402
 import gcodecheck  # noqa: E402
 from plate_watchdog import PrintMonitor
+from job_alerts import JobAlerts
 from status_cache import StatusCache
 from camera_relay import CameraHub, FFmpegReader, WebcamReader
 import parts as plate_parts
+import plate_centre
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "remote"))
 import printer_remote  # noqa: E402
@@ -41,6 +44,37 @@ _reconnect = threading.Event()   # set to force the MQTT loop to drop and reconn
 
 
 _print_monitor = PrintMonitor()
+
+
+def _ntfy(msg, pri=4):
+    """Phone alert through ntfy.sh; the topic lives in a private file (siteconf ntfy_topic_file)."""
+    try:
+        topic = open(siteconf.path("ntfy_topic_file")).read().strip()
+    except OSError:
+        return
+    def send():
+        try:
+            req = urllib.request.Request("https://ntfy.sh/" + topic, data=msg.encode(),
+                                         headers={"Title": "Printer", "Priority": str(pri)})
+            urllib.request.urlopen(req, timeout=15).read()
+        except Exception as e:
+            print("ntfy failed:", e, file=sys.stderr)
+    threading.Thread(target=send, daemon=True).start()
+
+
+_job_alerts = JobAlerts(_ntfy, stall_min=siteconf.get("stall_minutes"))
+
+
+def _job_alert_ticker():
+    while True:
+        time.sleep(30)
+        try:
+            _job_alerts.tick()
+        except Exception as e:
+            print("job alert tick failed:", e, file=sys.stderr)
+
+
+threading.Thread(target=_job_alert_ticker, daemon=True).start()
 _mobile_status = StatusCache()
 
 
@@ -59,6 +93,7 @@ def _on_message(c, u, m):
     # Monitor consumes raw reports, never stale fields from the merged UI snapshot.
     _mobile_status.observe(p)
     _print_monitor.observe(p)
+    _job_alerts.observe(p)
 
 
 def _mqtt_loop():
@@ -582,6 +617,7 @@ def api_inbox():
 
 BBL_DIR = siteconf.path("profiles_dir")
 PLATE_MM = 256  # P2S build plate is 256 x 256 mm
+CENTRE_MM = siteconf.get("centre_keepout_mm")  # worn plate centre: refuse prints there that could sit aside
 
 
 def _names(kind):
@@ -679,6 +715,7 @@ def api_model():
         fp = _stl_footprint(full)
         if fp:
             fp["overhang"] = _overhangs(full)
+            fp["centre_keepout"] = CENTRE_MM
         return jsonify(fp) if fp else (jsonify({"error": "no geometry"}), 400)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -968,7 +1005,7 @@ def _recording_on(p):
     return (p.get("ipcam") or {}).get("ipcam_record") == "enable"
 
 
-def _send_problems(path, slot, expect=None, fresh=False):
+def _send_problems(path, slot, expect=None, fresh=False, allow_runout=False):
     """Everything that should stop a send, as messages; empty means go.
     fresh: first get a new AMS report from the printer. expect: the slot's spool when it was sliced."""
     meta = _job_meta(path)
@@ -1000,6 +1037,9 @@ def _send_problems(path, slot, expect=None, fresh=False):
     if meta["plates"] > 1 or len(meta["filaments"]) != 1:
         probs.append("Only single-plate, single-filament jobs are supported.")
     b = meta.get("bbox")
+    centre = plate_centre.centre_problem(b, PLATE_MM, CENTRE_MM)
+    if centre:
+        probs.append(centre)
     if b and (b[0] < 0 or b[1] < 0 or b[2] > PLATE_MM or b[3] > PLATE_MM):
         probs.append("Sliced print (brim included) runs off the plate.")
     tray = next((a for a in _status_ams() if str(a["slot"]) == str(slot)), None)
@@ -1012,8 +1052,8 @@ def _send_problems(path, slot, expect=None, fresh=False):
         if tray["type"].upper() != want["type"].upper():
             probs.append("Sliced for %s; slot %s holds %s." % (want["type"], slot, tray["type"]))
         rem = tray.get("remain")
-        if rem is not None and rem >= 0 and rem / 100.0 * 1000.0 < want["grams"]:
-            probs.append("Low filament: ~%d g left, needs %.1f g." % (rem * 10, want["grams"]))
+        if rem is not None and rem >= 0 and rem / 100.0 * 1000.0 < want["grams"] and not allow_runout:
+            probs.append("Low filament: ~%d g left, needs %.1f g. Tick 'Let it run out' to print anyway." % (rem * 10, want["grams"]))
     if slot is not None and expect is not None:
         now = _tray_identity(slot)
         if now != expect:
@@ -1085,7 +1125,8 @@ def api_send():
         path, usb_name, slot = _pending["path"], _pending["usb_name"], _pending.get("slot")
         expect = _pending.get("tray")
     slow_layer = j.get("slow_layer")
-    probs = _send_problems(path, slot, expect, fresh=True)
+    runout = bool(j.get("allow_runout"))       # use up a nearly empty spool: AMS auto-refill or a run-out pause
+    probs = _send_problems(path, slot, expect, fresh=True, allow_runout=runout)
     if probs:
         return jsonify({"ok": False, "error": " ".join(probs)}), 400
     if slow_layer:
@@ -1103,7 +1144,7 @@ def api_send():
         if up.returncode != 0:
             return jsonify({"ok": False, "error": "upload failed: " + (up.stderr or "")[-300:]}), 502
         # The upload takes a while; check the printer and the spool again right before starting.
-        probs = _send_problems(path, slot, expect, fresh=True)
+        probs = _send_problems(path, slot, expect, fresh=True, allow_runout=runout)
         if probs:
             return jsonify({"ok": False, "error": "Uploaded but not started: " + " ".join(probs)}), 409
         # Persist the expected job before start so early reports are not missed.
@@ -1563,14 +1604,14 @@ function detailSlicedHTML(it){
   return '<div class="muted" style="margin-bottom:12px">'+esc(it.name)+'</div>'+
     '<div class="field">'+(it.grams!=null?('<b>'+it.grams+' g</b> · ~'+it.minutes+' min — already sliced'):'already sliced')+'</div>'+
     '<div class="field"><label>Print from AMS slot</label>'+amsPickHTML()+'</div>'+
-    vibeHTML()+'<button id="sendbtn" class="big">Send &amp; start</button>'+
+    vibeHTML()+runoutHTML()+'<button id="sendbtn" class="big">Send &amp; start</button>'+
     '<div id="sliceout" style="margin-top:10px"></div>';
 }
 
 async function selectFile(it){
   const det=$('detail');
   if(it.kind==='sliced'){ det.innerHTML=detailSlicedHTML(it); wireAms();
-    $('sendbtn').addEventListener('click',()=>doSend({name:it.name, slot:selectedSlot(), vibration:vibeOn()})); return; }
+    $('sendbtn').addEventListener('click',()=>doSend({name:it.name, slot:selectedSlot(), vibration:vibeOn(), allow_runout:runoutOn()})); return; }
   curNozzle=((last.nozzle_size||'0.4')+'');
   det.innerHTML=detailModelHTML(it);
   wireAms();
@@ -1607,8 +1648,8 @@ async function doSlice(name){
       (j.autoslow?'<label class="chk"><input type="checkbox" id="slowon"'+(j.autoslow.suggest?' checked':'')+'> Slow down above layer '+
         '<input type="number" id="slowlayer" min="2" value="'+j.autoslow.layer+'" style="width:80px"> '+
         '<span class="muted">(≈'+j.autoslow.z+' mm, outer wall slow throughout; part '+j.autoslow.height+' mm tall on a '+j.autoslow.width+' mm base)</span></label>':'')+
-      vibeHTML()+'<button id="sendbtn" class="big">Send &amp; start</button>';
-    $('sendbtn').addEventListener('click',()=>doSend({slow_layer:($('slowon')&&$('slowon').checked)?+$('slowlayer').value:null, vibration:vibeOn()}));
+      vibeHTML()+runoutHTML()+'<button id="sendbtn" class="big">Send &amp; start</button>';
+    $('sendbtn').addEventListener('click',()=>doSend({slow_layer:($('slowon')&&$('slowon').checked)?+$('slowlayer').value:null, vibration:vibeOn(), allow_runout:runoutOn()}));
   }catch(e){ out.innerHTML='<div class="chk-line bad">✕ '+esc(e)+'</div>'; }
   finally{ btn.disabled=false; }
 }
@@ -1621,6 +1662,8 @@ function vibeHTML(){ const v=vibeInfo, due=v&&v.due;
   return '<label class="chk"><input type="checkbox" id="vibe"'+(due?' checked disabled':'')+'> Vibration calibration'+
     (v&&v.every?' <span class="muted">('+(due?'due: every '+v.every+' sends':v.sends+' of '+v.every+' sends since last')+')</span>':'')+'</label>'; }
 function vibeOn(){ return !!($('vibe')&&$('vibe').checked); }
+function runoutHTML(){ return '<label class="chk"><input type="checkbox" id="runout"> Let it run out <span class="muted">(low spool: AMS refills from a matching spool, or the printer pauses; phone alert either way)</span></label>'; }
+function runoutOn(){ return !!($('runout')&&$('runout').checked); }
 async function doSend(body){
   const btn=$('sendbtn'), out=$('sliceout');
   if(body&&body.name&&body.slot==null){ out.innerHTML='<div class="chk-line bad">✕ pick an AMS slot first</div>'; return; }
@@ -1650,10 +1693,17 @@ async function loadProfiles(){
 async function loadFootprint(name){
   let fp; try{ fp=await (await fetch('api/model?name='+encodeURIComponent(name))).json(); }catch(e){ return; }
   if(fp.error){ foot=null; $('placeinfo').textContent=fp.error; return; }
-  foot=fp; place={x:fp.plate/2,y:fp.plate/2,rot:0}; drawPlate();
+  foot=fp; place=sidePlace(fp); drawPlate();
   const oh=fp.overhang;
   if(oh){ $('ohinfo').textContent=oh.ask?'— about '+(oh.mm2/100).toFixed(0)+' cm² overhangs; supports?':'— none needed';
     if(oh.ask) $('adv').open=true; }
+}
+function sidePlace(fp){ // left of the worn centre, else in front of it, else centred
+  const c=fp.plate/2, gap=(fp.centre_keepout||0)+8, h=fp.hull, n=h.length;
+  const cx=h.reduce((a,p)=>a+p[0],0)/n, cy=h.reduce((a,p)=>a+p[1],0)/n, b=fp.bbox;
+  const x=c-gap-(b[2]-cx); if(x-(cx-b[0])>=5) return {x:x,y:c,rot:0};
+  const y=c-gap-(b[3]-cy); if(y-(cy-b[1])>=5) return {x:c,y:y,rot:0};
+  return {x:c,y:c,rot:0};
 }
 function cvToMM(e){const cv=$('plate'),r=cv.getBoundingClientRect(),s=foot?foot.plate:256;
   return {x:(e.clientX-r.left)/r.width*s, y:s-(e.clientY-r.top)/r.height*s};}

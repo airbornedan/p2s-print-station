@@ -24,6 +24,9 @@ DEFAULTS = {
     "webcam_url": ("http://192.0.2.20:8081", "PRINT_STATION_WEBCAM"),
     "camera_width": (1280, "PRINT_STATION_CAM_W"),
     "vibration_every": (12, None),
+    "centre_keepout_mm": (30, None),
+    "ntfy_topic_file": ("~/.config/ntfy/topic", None),   # phone alerts (ntfy.sh topic); missing file = off
+    "stall_minutes": (20, None),
     "remote_admin": ("root@203.0.113.10", None),
     "tunnel_target": ("tunnel@example.com", None),
     "tunnel_key": ("~/.ssh/id_tunnel", None),

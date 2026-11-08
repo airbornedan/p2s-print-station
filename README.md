@@ -35,6 +35,12 @@ Vibration calibration runs on every 12th send (`vibration_every`), or when ticke
 
 Access code: from Bambu Studio's saved config, `$P2S_ACCESS_CODE`, or the page. It changes on cloud ↔ LAN switch.
 
+## Phone alerts (ntfy)
+
+Every print, however it was started, alerts through [ntfy.sh](https://ntfy.sh): AMS spool switch, pause or run-out, printer error, no new layer for `stall_minutes` (20), finish. Put your topic in `~/.config/ntfy/topic` (`ntfy_topic_file`); no file, no alerts.
+
+Low spool: Send refuses when the slot has less than the job needs, unless **Let it run out** is ticked; the AMS then refills from a matching spool or the printer pauses.
+
 ## Email alerts
 
 `~/.config/print_station/mail.toml`:
@@ -76,7 +82,7 @@ printer-remote off
 From `print_station/`:
 
 ```
-python -m unittest test_gcodecheck test_plate_watchdog test_printer_stage mobile.test_mobile mobile.test_push
+python -m unittest test_gcodecheck test_plate_centre test_plate_watchdog test_printer_stage mobile.test_mobile mobile.test_push
 (cd json_status && python -m unittest discover -p 'test_*.py')
 ```
 
