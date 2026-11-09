@@ -1,6 +1,6 @@
 """Slice an STL into a .gcode.3mf with the station's slicer and profiles; stop on a slicer warning.
 
-    python3 slice.py part.stl out.gcode.3mf --supports off|tree|plate [--brim auto|outer|none]
+    python3 slice.py part.stl out.gcode.3mf --supports off|tree|slim|plate [--brim auto|outer|none]
                      [--nozzle 0.4] [--quality "0.20mm Standard @BBL P2S"] [--filament "Generic PLA @BBL P2S"]
                      [--allow-warnings]
 
@@ -20,7 +20,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("stl")
     ap.add_argument("out")
-    ap.add_argument("--supports", required=True, choices=("off", "tree", "plate"))
+    ap.add_argument("--supports", required=True, choices=("off", "tree", "slim", "plate"))
     ap.add_argument("--brim", default="auto", choices=("auto", "outer", "none"))
     ap.add_argument("--nozzle", default="0.4")
     ap.add_argument("--quality")
@@ -38,6 +38,8 @@ def main():
     if a.supports != "off":
         proc.update(enable_support="1", support_type="tree(auto)",
                     support_on_build_plate_only="1" if a.supports == "plate" else "0")
+        if a.supports == "slim":
+            proc.update(support_style="tree_slim")
     if a.brim == "outer":
         proc.update(brim_type="outer_only", brim_width="5")
     elif a.brim == "none":
