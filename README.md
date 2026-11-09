@@ -41,6 +41,8 @@ Every print, however it was started, alerts through [ntfy.sh](https://ntfy.sh): 
 
 Low spool: Send refuses when the slot has less than the job needs, unless **Let it run out** is ticked; the AMS then refills from a matching spool or the printer pauses.
 
+Slicer warnings: before sending, the station re-slices the file's model (about 2 s) to get the warnings Bambu Studio shows, such as "floating cantilever" (needs supports). Send refuses on a warning, or on a file it can't check (exported as G-code only), unless **Print despite slicer warning** is ticked.
+
 ## Email alerts
 
 `~/.config/print_station/mail.toml`:
@@ -82,7 +84,7 @@ printer-remote off
 From `print_station/`:
 
 ```
-python -m unittest test_gcodecheck test_plate_centre test_plate_watchdog test_printer_stage mobile.test_mobile mobile.test_push
+python -m unittest test_gcodecheck test_slicecheck test_plate_centre test_plate_watchdog test_printer_stage mobile.test_mobile mobile.test_push
 (cd json_status && python -m unittest discover -p 'test_*.py')
 ```
 

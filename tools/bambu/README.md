@@ -44,7 +44,9 @@ The LAN access code is a credential; never commit it. Read from `$P2S_ACCESS_COD
 - `cam.py {snap out.jpg | clip <secs> out.mp4}`
 - `clear_and_check.py`: stop and clear an error.
 - `gcodecheck.py part.gcode.3mf`: checks the start G-code has the AMS load, bed leveling and nozzle heat (an incomplete machine profile drops them). The station and `start.py --local` refuse a file that fails.
-- `estimate.py parts.toml`: sliced filament estimates and a print-requirements table for a project (format in the docstring).
+- `estimate.py parts.toml`: sliced filament estimates and a print-requirements table for a project (format in the docstring). Stops on a slicer warning unless the job has `allow_warnings = true`.
+- `slice.py part.stl out.gcode.3mf --supports off|tree|plate`: slices with the station's profiles; `--supports` is required. Writes nothing on a slicer warning (e.g. "floating cantilever") unless `--allow-warnings`.
+- `slicecheck.py part.gcode.3mf`: the slicer's warnings for an already-sliced file (re-slices its model).
 
 ## Printer quirks
 

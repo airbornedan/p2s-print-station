@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools", "bambu
 import p2s  # noqa: E402
 import siteconf  # noqa: E402
 import gcodecheck  # noqa: E402
+import slicecheck  # noqa: E402
 from plate_watchdog import PrintMonitor
 from job_alerts import JobAlerts
 from status_cache import StatusCache
@@ -870,13 +871,18 @@ def api_slice():
            "--load-filaments", fil_json,
            "--export-3mf", out, stl]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
+        rj = os.path.join(WORK, "result.json")
+        if os.path.exists(rj):
+            os.remove(rj)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=240, cwd=WORK)
     except subprocess.TimeoutExpired:
         return jsonify({"ok": False, "error": "slice timed out"}), 500
     if r.returncode != 0 or not _job_meta(out):
         tail = "\n".join((r.stderr or r.stdout or "").strip().splitlines()[-4:])
         return jsonify({"ok": False, "error": "slice failed:\n" + tail}), 500
 
+    st = os.stat(out)
+    _slicer_checks[(os.path.abspath(out), st.st_mtime, st.st_size)] = slicecheck.read_result(rj)
     grams, minutes = _sliced_info(out)
     color = j.get("color") or "#8a8a8a"
     prev = os.path.join(WORK, "preview.png")
@@ -1005,7 +1011,22 @@ def _recording_on(p):
     return (p.get("ipcam") or {}).get("ipcam_record") == "enable"
 
 
-def _send_problems(path, slot, expect=None, fresh=False, allow_runout=False):
+_slicer_checks = {}   # (path, mtime, size) -> (warnings, error)
+
+
+def _slicer_check(path):
+    """The slicer's own warnings for a sliced file (re-sliced once, then cached)."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return [], "file not found"
+    key = (os.path.abspath(path), st.st_mtime, st.st_size)
+    if key not in _slicer_checks:
+        _slicer_checks[key] = slicecheck.slicer_warnings(path, APPIMAGE) if APPIMAGE else ([], "no slicer configured")
+    return _slicer_checks[key]
+
+
+def _send_problems(path, slot, expect=None, fresh=False, allow_runout=False, allow_warnings=False):
     """Everything that should stop a send, as messages; empty means go.
     fresh: first get a new AMS report from the printer. expect: the slot's spool when it was sliced."""
     meta = _job_meta(path)
@@ -1017,6 +1038,12 @@ def _send_problems(path, slot, expect=None, fresh=False, allow_runout=False):
         p = dict(_state["print"])
         connected, age = _state["connected"], time.time() - _state["updated"] if _state["updated"] else None
     probs = gcodecheck.start_problems(path)
+    if not allow_warnings:
+        warns, err = _slicer_check(path)
+        override = " Tick 'Print despite slicer warning' to send anyway."
+        probs += ["Slicer warning: %s%s" % (w, override) for w in warns]
+        if err:
+            probs.append("Slicer check couldn't run: %s.%s" % (err, override))
     if not connected or age is None or age > 30:
         return probs + ["No fresh printer status (connected? current access code?)."]
     if not p.get("sdcard"):
@@ -1126,7 +1153,8 @@ def api_send():
         expect = _pending.get("tray")
     slow_layer = j.get("slow_layer")
     runout = bool(j.get("allow_runout"))       # use up a nearly empty spool: AMS auto-refill or a run-out pause
-    probs = _send_problems(path, slot, expect, fresh=True, allow_runout=runout)
+    warnok = bool(j.get("allow_warnings"))     # the slicer warned (e.g. needs supports) and Dan chose to print anyway
+    probs = _send_problems(path, slot, expect, fresh=True, allow_runout=runout, allow_warnings=warnok)
     if probs:
         return jsonify({"ok": False, "error": " ".join(probs)}), 400
     if slow_layer:
@@ -1144,7 +1172,7 @@ def api_send():
         if up.returncode != 0:
             return jsonify({"ok": False, "error": "upload failed: " + (up.stderr or "")[-300:]}), 502
         # The upload takes a while; check the printer and the spool again right before starting.
-        probs = _send_problems(path, slot, expect, fresh=True, allow_runout=runout)
+        probs = _send_problems(path, slot, expect, fresh=True, allow_runout=runout, allow_warnings=warnok)
         if probs:
             return jsonify({"ok": False, "error": "Uploaded but not started: " + " ".join(probs)}), 409
         # Persist the expected job before start so early reports are not missed.
@@ -1604,14 +1632,14 @@ function detailSlicedHTML(it){
   return '<div class="muted" style="margin-bottom:12px">'+esc(it.name)+'</div>'+
     '<div class="field">'+(it.grams!=null?('<b>'+it.grams+' g</b> · ~'+it.minutes+' min — already sliced'):'already sliced')+'</div>'+
     '<div class="field"><label>Print from AMS slot</label>'+amsPickHTML()+'</div>'+
-    vibeHTML()+runoutHTML()+'<button id="sendbtn" class="big">Send &amp; start</button>'+
+    vibeHTML()+runoutHTML()+warnokHTML()+'<button id="sendbtn" class="big">Send &amp; start</button>'+
     '<div id="sliceout" style="margin-top:10px"></div>';
 }
 
 async function selectFile(it){
   const det=$('detail');
   if(it.kind==='sliced'){ det.innerHTML=detailSlicedHTML(it); wireAms();
-    $('sendbtn').addEventListener('click',()=>doSend({name:it.name, slot:selectedSlot(), vibration:vibeOn(), allow_runout:runoutOn()})); return; }
+    $('sendbtn').addEventListener('click',()=>doSend({name:it.name, slot:selectedSlot(), vibration:vibeOn(), allow_runout:runoutOn(), allow_warnings:warnokOn()})); return; }
   curNozzle=((last.nozzle_size||'0.4')+'');
   det.innerHTML=detailModelHTML(it);
   wireAms();
@@ -1648,8 +1676,8 @@ async function doSlice(name){
       (j.autoslow?'<label class="chk"><input type="checkbox" id="slowon"'+(j.autoslow.suggest?' checked':'')+'> Slow down above layer '+
         '<input type="number" id="slowlayer" min="2" value="'+j.autoslow.layer+'" style="width:80px"> '+
         '<span class="muted">(≈'+j.autoslow.z+' mm, outer wall slow throughout; part '+j.autoslow.height+' mm tall on a '+j.autoslow.width+' mm base)</span></label>':'')+
-      vibeHTML()+runoutHTML()+'<button id="sendbtn" class="big">Send &amp; start</button>';
-    $('sendbtn').addEventListener('click',()=>doSend({slow_layer:($('slowon')&&$('slowon').checked)?+$('slowlayer').value:null, vibration:vibeOn(), allow_runout:runoutOn()}));
+      vibeHTML()+runoutHTML()+warnokHTML()+'<button id="sendbtn" class="big">Send &amp; start</button>';
+    $('sendbtn').addEventListener('click',()=>doSend({slow_layer:($('slowon')&&$('slowon').checked)?+$('slowlayer').value:null, vibration:vibeOn(), allow_runout:runoutOn(), allow_warnings:warnokOn()}));
   }catch(e){ out.innerHTML='<div class="chk-line bad">✕ '+esc(e)+'</div>'; }
   finally{ btn.disabled=false; }
 }
@@ -1664,6 +1692,8 @@ function vibeHTML(){ const v=vibeInfo, due=v&&v.due;
 function vibeOn(){ return !!($('vibe')&&$('vibe').checked); }
 function runoutHTML(){ return '<label class="chk"><input type="checkbox" id="runout"> Let it run out <span class="muted">(low spool: AMS refills from a matching spool, or the printer pauses; phone alert either way)</span></label>'; }
 function runoutOn(){ return !!($('runout')&&$('runout').checked); }
+function warnokHTML(){ return '<label class="chk"><input type="checkbox" id="warnok"> Print despite slicer warning <span class="muted">(e.g. "floating cantilever": the slicer thinks it needs supports)</span></label>'; }
+function warnokOn(){ return !!($('warnok')&&$('warnok').checked); }
 async function doSend(body){
   const btn=$('sendbtn'), out=$('sliceout');
   if(body&&body.name&&body.slot==null){ out.innerHTML='<div class="chk-line bad">✕ pick an AMS slot first</div>'; return; }

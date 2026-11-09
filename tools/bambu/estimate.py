@@ -19,6 +19,7 @@ parts.toml:
     quality = "0.10mm Standard @BBL P2S 0.2 nozzle"
     filament = "Generic PLA @BBL P2S 0.2 nozzle"
     supports = "off"                             # off | tree
+    allow_warnings = false                       # true: accept a slicer warning such as "floating cantilever"
     notes = "..."
 
     [[pending]]
@@ -28,6 +29,7 @@ parts.toml:
 import hashlib, json, os, re, subprocess, sys, tempfile, tomllib, zipfile
 
 import siteconf
+import slicecheck
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE = os.path.expanduser("~/.local/share/print_station/estimates")
@@ -62,11 +64,14 @@ def slice_one(stl, job, appimage):
         r = subprocess.run([appimage, "--slice", "0", "--arrange", "1", "--orient", "0",
                             "--load-settings", "%s;%s" % (os.path.join(prof, machine + ".json"), pj),
                             "--load-filaments", os.path.join(prof, job["filament"] + ".json"),
-                            "--export-3mf", out, stl], capture_output=True, text=True, timeout=600)
+                            "--export-3mf", out, stl], capture_output=True, text=True, timeout=600, cwd=tmp)
         try:
             info = zipfile.ZipFile(out).read("Metadata/slice_info.config").decode()
         except (OSError, KeyError, zipfile.BadZipFile):
             raise RuntimeError("slice failed: " + (r.stderr or r.stdout).strip()[-300:])
+        warns, _ = slicecheck.read_result(os.path.join(tmp, "result.json"))
+        if warns and not job.get("allow_warnings"):
+            raise RuntimeError("slicer warning (set allow_warnings = true to accept): " + " ".join(warns))
     g = re.search(r'key="weight"\s+value="([\d.]+)"', info)
     t = re.search(r'key="prediction"\s+value="(\d+)"', info)
     if not g or float(g.group(1)) <= 0:
@@ -86,7 +91,7 @@ def main(manifest, force=False):
         parts = []
         for i, rel in enumerate(job["files"]):
             stl = os.path.join(base, rel)
-            settings = {k: job.get(k) for k in ("nozzle", "quality", "filament", "supports")}
+            settings = {k: job.get(k) for k in ("nozzle", "quality", "filament", "supports", "allow_warnings")}
             key = hashlib.sha256(json.dumps([sha(stl), settings, slicer]).encode()).hexdigest()
             prev = next((p for p in old.get(job["id"], {}).get("parts", []) if p.get("key") == key), None)
             if prev and not force:
