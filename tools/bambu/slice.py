@@ -26,6 +26,9 @@ def main():
     ap.add_argument("--quality")
     ap.add_argument("--filament")
     ap.add_argument("--allow-warnings", action="store_true")
+    ap.add_argument("--keep-position", action="store_true",
+                    help="slice the STL where it is (plate mm, origin front-left) instead of auto-arranging; "
+                         "auto-arrange keeps parts farther from the edges when supports are on, so big parts fail")
     a = ap.parse_args()
     suffix = "" if a.nozzle == "0.4" else " %s nozzle" % a.nozzle
     machine = "Bambu Lab P2S %s nozzle" % a.nozzle
@@ -48,7 +51,7 @@ def main():
         pj, out = os.path.join(tmp, "process.json"), os.path.join(tmp, "out.gcode.3mf")
         with open(pj, "w") as f:
             json.dump(proc, f)
-        r = subprocess.run([siteconf.path("appimage"), "--slice", "0", "--arrange", "1", "--orient", "0",
+        r = subprocess.run([siteconf.path("appimage"), "--slice", "0", "--arrange", "0" if a.keep_position else "1", "--orient", "0",
                             "--load-settings", "%s;%s" % (os.path.join(prof, machine + ".json"), pj),
                             "--load-filaments", os.path.join(prof, filament + ".json"),
                             "--export-3mf", out, os.path.abspath(a.stl)],
