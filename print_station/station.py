@@ -24,6 +24,7 @@ from job_alerts import JobAlerts
 from status_cache import StatusCache
 from camera_relay import CameraHub, FFmpegReader, WebcamReader
 import parts as plate_parts
+from stick_cleanup import StickCleanup
 import plate_centre
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "remote"))
@@ -95,6 +96,7 @@ def _on_message(c, u, m):
     _mobile_status.observe(p)
     _print_monitor.observe(p)
     _job_alerts.observe(p)
+    _stick_cleanup.observe(p)
 
 
 def _mqtt_loop():
@@ -485,6 +487,8 @@ SKIPPABLE_STATES = {"RUNNING", "PAUSE"}
 PARTS_RETRY = 60   # seconds before retrying a failed fetch
 _parts = {"key": None, "parts": None, "busy": False, "retry_at": 0.0}
 _parts_lock = threading.Lock()
+_ftps_lock = threading.Lock()   # one FTPS session at a time from this process
+_stick_cleanup = StickCleanup(ftps.connect, _ftps_lock, timelapse=siteconf.get("delete_timelapse"))
 
 
 def _job_key(p):
@@ -497,7 +501,8 @@ def _fetch_parts(key):
     result, retry_at = None, 0.0
     try:
         os.makedirs(WORK, exist_ok=True)
-        ftps.download(name + ".gcode.3mf", dest, timeout=60)
+        with _ftps_lock:
+            ftps.download(name + ".gcode.3mf", dest, timeout=60)
         result = plate_parts.read_parts(dest, plate) or []
     except Exception as e:
         print("skip part: can't read the job's parts:", type(e).__name__, e, file=sys.stderr, flush=True)

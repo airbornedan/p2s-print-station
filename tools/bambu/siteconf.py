@@ -27,6 +27,7 @@ DEFAULTS = {
     "centre_keepout_mm": (30, None),
     "ntfy_topic_file": ("~/.config/ntfy/topic", None),   # phone alerts (ntfy.sh topic); missing file = off
     "stall_minutes": (20, None),
+    "delete_timelapse": (True, None),   # empty the USB stick's /timelapse at each new job
     "remote_admin": ("root@203.0.113.10", None),
     "tunnel_target": ("tunnel@example.com", None),
     "tunnel_key": ("~/.ssh/id_tunnel", None),

@@ -12,6 +12,7 @@ remote_port = 8079        # remote-only listener (tunnel end)
 vibration_every = 12      # vibration calibration runs on every Nth send (0 = only when ticked)
 centre_keepout_mm = 30    # refuse prints touching this radius around the plate centre (worn) when they fit beside it; 0 = off
 ntfy_topic_file = "~/.config/ntfy/topic"   # phone alerts via ntfy.sh; missing file = off
+delete_timelapse = true   # empty the USB stick's /timelapse folder at each new job; false = keep videos
 stall_minutes = 20        # alert when no new layer arrives for this long
 inbox = "~/print_inbox"   # files offered for printing
 work_dir = "~/.local/share/print_station/work"
