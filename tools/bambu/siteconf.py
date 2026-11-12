@@ -28,6 +28,8 @@ DEFAULTS = {
     "ntfy_topic_file": ("~/.config/ntfy/topic", None),   # phone alerts (ntfy.sh topic); missing file = off
     "stall_minutes": (20, None),
     "delete_timelapse": (True, None),   # empty the USB stick's /timelapse at each new job
+    "stick_max_age_days": (5, None),    # delete print files older than this from the USB stick
+    "phone_alerts": (True, None),       # ntfy pushes on/off (the topic file must exist too)
     "remote_admin": ("root@203.0.113.10", None),
     "tunnel_target": ("tunnel@example.com", None),
     "tunnel_key": ("~/.ssh/id_tunnel", None),
@@ -42,10 +44,20 @@ DEFAULTS = {
 _file = None
 
 
+def config_file():
+    return os.path.expanduser(os.environ.get("PRINT_STATION_CONFIG", "~/.config/print_station/config.toml"))
+
+
+def reload():
+    """Re-read the config file on the next get() (after the Settings tab saves it)."""
+    global _file
+    _file = None
+
+
 def _load():
     global _file
     if _file is None:
-        path = os.path.expanduser(os.environ.get("PRINT_STATION_CONFIG", "~/.config/print_station/config.toml"))
+        path = config_file()
         _file = {}
         if tomllib and os.path.isfile(path):
             with open(path, "rb") as f:

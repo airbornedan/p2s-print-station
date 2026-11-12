@@ -13,6 +13,8 @@ vibration_every = 12      # vibration calibration runs on every Nth send (0 = on
 centre_keepout_mm = 30    # refuse prints touching this radius around the plate centre (worn) when they fit beside it; 0 = off
 ntfy_topic_file = "~/.config/ntfy/topic"   # phone alerts via ntfy.sh; missing file = off
 delete_timelapse = true   # empty the USB stick's /timelapse folder at each new job; false = keep videos
+stick_max_age_days = 5    # delete print files older than this from the USB stick (running job kept)
+phone_alerts = true       # ntfy pushes; needs ntfy_topic_file too
 stall_minutes = 20        # alert when no new layer arrives for this long
 inbox = "~/print_inbox"   # files offered for printing
 work_dir = "~/.local/share/print_station/work"

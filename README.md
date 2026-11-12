@@ -84,7 +84,7 @@ printer-remote off
 From `print_station/`:
 
 ```
-python -m unittest test_gcodecheck test_slicecheck test_stick_cleanup test_plate_centre test_plate_watchdog test_printer_stage mobile.test_mobile mobile.test_push
+python -m unittest test_gcodecheck test_slicecheck test_settings test_stick_cleanup test_plate_centre test_plate_watchdog test_printer_stage mobile.test_mobile mobile.test_push
 (cd json_status && python -m unittest discover -p 'test_*.py')
 ```
 

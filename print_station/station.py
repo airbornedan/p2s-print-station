@@ -26,6 +26,7 @@ from camera_relay import CameraHub, FFmpegReader, WebcamReader
 import parts as plate_parts
 from stick_cleanup import StickCleanup
 import plate_centre
+import settings as site_settings
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "remote"))
 import printer_remote  # noqa: E402
@@ -50,6 +51,8 @@ _print_monitor = PrintMonitor()
 
 def _ntfy(msg, pri=4):
     """Phone alert through ntfy.sh; the topic lives in a private file (siteconf ntfy_topic_file)."""
+    if not siteconf.get("phone_alerts"):
+        return
     try:
         topic = open(siteconf.path("ntfy_topic_file")).read().strip()
     except OSError:
@@ -488,7 +491,8 @@ PARTS_RETRY = 60   # seconds before retrying a failed fetch
 _parts = {"key": None, "parts": None, "busy": False, "retry_at": 0.0}
 _parts_lock = threading.Lock()
 _ftps_lock = threading.Lock()   # one FTPS session at a time from this process
-_stick_cleanup = StickCleanup(ftps.connect, _ftps_lock, timelapse=siteconf.get("delete_timelapse"))
+_stick_cleanup = StickCleanup(ftps.connect, _ftps_lock, options=lambda: {
+    "timelapse": siteconf.get("delete_timelapse"), "max_age_days": int(siteconf.get("stick_max_age_days"))})
 
 
 def _job_key(p):
@@ -628,7 +632,6 @@ def api_inbox():
 
 BBL_DIR = siteconf.path("profiles_dir")
 PLATE_MM = 256  # P2S build plate is 256 x 256 mm
-CENTRE_MM = siteconf.get("centre_keepout_mm")  # worn plate centre: refuse prints there that could sit aside
 
 
 def _names(kind):
@@ -726,7 +729,7 @@ def api_model():
         fp = _stl_footprint(full)
         if fp:
             fp["overhang"] = _overhangs(full)
-            fp["centre_keepout"] = CENTRE_MM
+            fp["centre_keepout"] = siteconf.get("centre_keepout_mm")
         return jsonify(fp) if fp else (jsonify({"error": "no geometry"}), 400)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1074,7 +1077,7 @@ def _send_problems(path, slot, expect=None, fresh=False, allow_runout=False, all
     if meta["plates"] > 1 or len(meta["filaments"]) != 1:
         probs.append("Only single-plate, single-filament jobs are supported.")
     b = meta.get("bbox")
-    centre = plate_centre.centre_problem(b, PLATE_MM, CENTRE_MM)
+    centre = plate_centre.centre_problem(b, PLATE_MM, siteconf.get("centre_keepout_mm"))  # worn plate centre
     if centre:
         probs.append(centre)
     if b and (b[0] < 0 or b[1] < 0 or b[2] > PLATE_MM or b[3] > PLATE_MM):
@@ -1212,6 +1215,49 @@ def api_send():
         return jsonify({"ok": False, "error": "send timed out"}), 500
 
 
+# ---- Settings tab (LAN only: not in REMOTE_OK, so the remote listener refuses these) ----
+def _settings_view():
+    fields = [{"key": k, "label": label, "type": "bool" if typ is bool else "int", "min": lo, "max": hi,
+               "help": hlp, "value": siteconf.get(k)} for k, label, typ, lo, hi, hlp in site_settings.FIELDS]
+    return {"fields": fields, "remote": {"on": printer_remote.is_on(), "status": printer_remote.status()}}
+
+
+@app.get("/api/settings")
+def api_settings():
+    return jsonify(_settings_view())
+
+
+@app.post("/api/settings")
+def api_settings_save():
+    try:
+        updates = site_settings.validate(request.get_json(force=True) or {})
+        site_settings.save(siteconf.config_file(), updates)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    siteconf.reload()
+    _job_alerts.stall = int(siteconf.get("stall_minutes")) * 60
+    return jsonify({"ok": True, **_settings_view()})
+
+
+@app.post("/api/settings/remote")
+def api_settings_remote():
+    action = (request.get_json(force=True) or {}).get("action")
+    try:
+        if action == "on":
+            printer_remote.on(4)
+        elif action == "allow":
+            printer_remote.allow()
+        elif action == "extend":
+            printer_remote.extend(1)
+        elif action == "off":
+            printer_remote.off()
+        else:
+            return jsonify({"ok": False, "error": "unknown action"}), 400
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), **_settings_view()}), 502
+    return jsonify({"ok": True, **_settings_view()})
+
+
 @app.get("/")
 def index():
     page = PAGE.replace("<body>", '<body class="remote">', 1) if _is_remote() else PAGE
@@ -1237,6 +1283,12 @@ nav.tabs{display:flex;gap:6px}
 .statusbar{max-width:1200px;margin:16px auto 0;padding:0 16px}
 main{max-width:1200px;margin:0 auto;padding:16px}
 .panel.hidden{display:none}
+.setgrid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));align-items:start}
+.setrow{display:flex;align-items:center;gap:12px;padding:9px 0;border-bottom:1px solid var(--line)}
+.setrow:last-child{border-bottom:0}.setrow label{flex:1}.setrow .muted{display:block;font-size:13px}
+.setrow input[type=number]{width:80px;font:inherit;color:var(--fg);background:#2a3140;border:1px solid var(--line);border-radius:8px;padding:5px 8px}
+.setrow input[type=checkbox]{width:20px;height:20px}
+.setbtns{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
 .monitor{display:grid;gap:14px;align-items:start;grid-template-columns:minmax(0,1.7fr) minmax(300px,1fr)}
 .monitor .right{display:flex;flex-direction:column;gap:14px}
 @media(max-width:820px){.monitor{grid-template-columns:1fr}}
@@ -1340,6 +1392,7 @@ summary{cursor:pointer;color:var(--mut);font-size:13px;margin-bottom:10px}
   <nav class="tabs">
     <button class="tab-btn on" data-tab="monitor">Monitor</button>
     <button class="tab-btn lanonly" data-tab="inbox">Inbox</button>
+    <button class="tab-btn lanonly" data-tab="settings">Settings</button>
   </nav>
   <span class="muted" id="linktxt"></span>
 </header>
@@ -1425,6 +1478,24 @@ summary{cursor:pointer;color:var(--mut);font-size:13px;margin-bottom:10px}
         <div class="inbox" id="inbox"><div class="empty">Loading…</div></div>
       </div>
       <div class="card" id="detail"><div class="empty">Select a file to set up a print.</div></div>
+    </div>
+  </section>
+  <section class="panel hidden lanonly" id="panel-settings">
+    <div class="setgrid">
+      <div class="card">
+        <div class="muted" style="margin-bottom:10px">Station settings · saved to config.toml, applied at once</div>
+        <div id="setfields"></div>
+        <div class="muted" id="setmsg"></div>
+      </div>
+      <div class="card">
+        <div class="muted" style="margin-bottom:10px">Remote access (danzbb.com/printer/)</div>
+        <div id="remstatus">—</div>
+        <div class="setbtns">
+          <button data-remote="on">On 4 h</button><button data-remote="allow">Allow latest relay login</button>
+          <button data-remote="extend">Extend 1 h</button><button class="stop" data-remote="off">Off</button>
+        </div>
+        <div class="muted" id="remmsg"></div>
+      </div>
     </div>
   </section>
 </main>
@@ -1592,8 +1663,41 @@ function showTab(name){
   document.querySelectorAll('.tab-btn').forEach(b=>b.classList.toggle('on',b.dataset.tab===name));
   document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('hidden',p.id!=='panel-'+name));
   if(name==='inbox') loadInbox();
+  if(name==='settings') loadSettings();
 }
 document.querySelectorAll('.tab-btn').forEach(b=>b.addEventListener('click',()=>showTab(b.dataset.tab)));
+// settings tab
+async function loadSettings(){
+  const r=await fetch('/api/settings'); if(!r.ok){$('setmsg').textContent='Not available here.';return;}
+  showSettings(await r.json());
+}
+function showSettings(d){
+  const box=$('setfields'); box.innerHTML='';
+  for(const f of d.fields){
+    const row=document.createElement('div'); row.className='setrow';
+    const lab=document.createElement('label'); lab.textContent=f.label;
+    const h=document.createElement('span'); h.className='muted'; h.textContent=f.help; lab.appendChild(h);
+    const inp=document.createElement('input');
+    if(f.type==='bool'){inp.type='checkbox'; inp.checked=!!f.value;}
+    else{inp.type='number'; inp.min=f.min; inp.max=f.max; inp.value=f.value;}
+    inp.addEventListener('change',()=>saveSetting(f.key, f.type==='bool'?inp.checked:inp.value));
+    row.append(lab,inp); box.appendChild(row);
+  }
+  $('remstatus').textContent='Remote: '+d.remote.status;
+}
+async function saveSetting(key,value){
+  $('setmsg').textContent='Saving…';
+  const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({[key]:value})});
+  const d=await r.json();
+  if(d.ok){showSettings(d); $('setmsg').textContent='Saved.';} else {$('setmsg').textContent=d.error; loadSettings();}
+}
+document.querySelectorAll('[data-remote]').forEach(b=>b.addEventListener('click',async()=>{
+  $('remmsg').textContent='Working…';
+  const r=await fetch('/api/settings/remote',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:b.dataset.remote})});
+  const d=await r.json();
+  if(d.remote)$('remstatus').textContent='Remote: '+d.remote.status;
+  $('remmsg').textContent=d.ok?'Done.':d.error;
+}));
 
 function human(n){return n>1048576?(n/1048576).toFixed(1)+' MB':(n/1024).toFixed(0)+' KB';}
 async function loadInbox(){

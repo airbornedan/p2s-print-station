@@ -1,5 +1,5 @@
 """Keep the P2S USB stick from filling. At each new job, and once when the station starts: empty /timelapse
-(setting delete_timelapse, default on) and delete print files older than MAX_AGE_DAYS, never the running
+(setting delete_timelapse, default on) and delete print files older than max_age_days (default 5), never the running
 job's file. Sliced files can be remade from their STLs, so nothing is copied first."""
 import sys, threading, time
 from datetime import datetime, timezone
@@ -38,13 +38,13 @@ def _empty_dir(f, path):
     return n
 
 
-def clean(connect, keep, now=None, log=print, timelapse=True):
+def clean(connect, keep, now=None, log=print, timelapse=True, max_age_days=MAX_AGE_DAYS):
     """One cleanup pass over FTPS; keep = names that must stay (the running job's file)."""
     f = connect()
     try:
         names = [n.lstrip("/") for n in f.nlst("/")]
         prints = {n: _mtime(f, "/" + n) for n in names if n.endswith(PRINT_EXT)}
-        gone = old_prints(prints, keep, now or time.time())
+        gone = old_prints(prints, keep, now or time.time(), max_age_days)
         for n in gone:
             f.delete("/" + n)
         clips = _empty_dir(f, "/timelapse") if timelapse and "timelapse" in names else 0
@@ -61,8 +61,10 @@ def clean(connect, keep, now=None, log=print, timelapse=True):
 class StickCleanup:
     """Runs clean() once at start and again whenever a new job begins."""
 
-    def __init__(self, connect, lock=None, log=None, timelapse=True):
-        self._connect, self._lock, self._timelapse = connect, lock or threading.Lock(), timelapse
+    def __init__(self, connect, lock=None, log=None, options=None):
+        """options() -> {"timelapse": bool, "max_age_days": int}, read at each run so settings apply live."""
+        self._connect, self._lock = connect, lock or threading.Lock()
+        self._options = options or (lambda: {})
         self._log = log or (lambda m: print(m, file=sys.stderr, flush=True))
         self._job, self._keep, self._started = None, set(), False
 
@@ -82,6 +84,6 @@ class StickCleanup:
     def run(self, keep):
         with self._lock:
             try:
-                clean(self._connect, keep, log=self._log, timelapse=self._timelapse)
+                clean(self._connect, keep, log=self._log, **self._options())
             except Exception as e:
                 self._log("stick cleanup failed: %s %s" % (type(e).__name__, e))
