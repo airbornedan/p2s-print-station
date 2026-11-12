@@ -19,6 +19,21 @@ def running(a, layer=5, tray='1'):
 
 
 class AlertsTest(unittest.TestCase):
+    def test_restart_mid_print_adopts_silently_then_alerts_end(self):
+        a, sent, _ = make()
+        a.observe({'gcode_state': 'PAUSE', 'subtask_name': 'leg', 'layer_num': 80, 'total_layer_num': 300,
+                   'stg_cur': 6, 'print_error': 7, 'ams': {'tray_now': '3'}})
+        self.assertEqual(sent, [])           # existing pause and error are not re-sent
+        a.observe({'gcode_state': 'RUNNING'})
+        a.observe({'gcode_state': 'FINISH'})
+        self.assertEqual(len(sent), 1)
+        self.assertIn('finished', sent[0][0])
+
+    def test_restart_then_new_error_alerts(self):
+        a, sent, _ = make(); running(a)
+        a.observe({'print_error': 1234})
+        self.assertEqual(len(sent), 1)
+
     def test_switch_while_paused_for_runout(self):
         a, sent, _ = make(); running(a)
         a.observe({'gcode_state': 'PAUSE', 'stg_cur': 6, 'ams': {'tray_now': '255'}})

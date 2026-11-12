@@ -220,7 +220,7 @@ app = Flask(__name__)
 # ---- remote access (<server>/printer/, switched by remote/printer_remote.py) ----------------
 # The droplet's Apache checks the IP allowlist and password and sets X-Print-Remote. Remote
 # viewers get monitor + pause/resume/stop/skip part/light only; everything else stays LAN-only.
-REMOTE_OK = {("GET", "/"), ("GET", "/cam.mjpeg"), ("GET", "/api/status"), ("GET", "/api/remote"),
+REMOTE_OK = {("GET", "/"), ("GET", "/cam.mjpeg"), ("GET", "/api/camera-health"), ("GET", "/api/status"), ("GET", "/api/remote"),
              ("POST", "/api/remote/extend"), ("POST", "/api/control/pause"), ("POST", "/api/control/resume"),
              ("POST", "/api/control/stop"), ("POST", "/api/skip"), ("POST", "/api/control/light_on"), ("POST", "/api/control/light_off")}
 
@@ -287,6 +287,11 @@ def cam_mjpeg():
         return jsonify(error="Too many viewers"), 429
     gen = _cameras.frames(key, owner, fps=1 if _is_remote() else (10 if source == "bambu" else 5), auto_renew=True)
     return Response(gen, mimetype="multipart/x-mixed-replace; boundary=frame")
+
+
+@app.get("/api/camera-health")
+def api_camera_health():
+    return jsonify({src: _cameras.health(src) for src in ("bambu", "webcam")})
 
 
 @app.post("/api/code")
@@ -1545,11 +1550,18 @@ function camUrl(src){return 'cam.mjpeg?src='+src+'&t='+Date.now();}
 function setSrc(src,note){camSrc=src; try{localStorage.setItem('camsrc',src);}catch(e){}
   document.querySelectorAll('#camsrc button').forEach(b=>b.classList.toggle('on',b.dataset.src===src));
   $('camlabel').textContent=note||camNames[src];}
-function camStart(){camOn=true;$('camoff').style.display='none';$('cam').style.display='block';
+// Streams end after 10 minutes (the station enforces it too) and pause while the tab is hidden.
+const CAM_LIMIT=600000; let camTimer=null, camHidden=false, rcamOn=false, rcamTimer=null;
+function camPaused(off,again,why){off.style.display='flex';off.textContent=(why||'Camera paused after 10 minutes.')+' ';
+  const b=document.createElement('button');b.textContent='Reconnect camera';
+  b.addEventListener('click',e=>{e.stopPropagation();again();});off.appendChild(b);}
+function camPause(){camStop();$('camtoggle').textContent='Start';camPaused($('camoff'),camStart);}
+function camStart(){camOn=true;camHidden=false;clearTimeout(camTimer);camTimer=setTimeout(camPause,CAM_LIMIT);
+  $('camoff').style.display='none';$('cam').style.display='block';
   setSrc(camSrc,$('camlabel').dataset.note); $('camlabel').dataset.note='';
   $('cam').src=camUrl(camSrc);$('camtoggle').textContent='Stop';}
 document.querySelectorAll('#camsrc button').forEach(b=>b.addEventListener('click',()=>{camSrc=b.dataset.src;camStart();}));
-function camStop(){camOn=false;$('cam').src='';$('cam').style.display='none';
+function camStop(){camOn=false;clearTimeout(camTimer);$('cam').src='';$('cam').style.display='none';
   $('camoff').style.display='flex';$('camoff').textContent='Camera stopped.';$('camtoggle').textContent='Start';}
 $('cam').addEventListener('error',()=>{if(!camOn||!$('cam').getAttribute('src'))return;
   if(camSrc==='bambu'){$('camlabel').dataset.note='Webcam (printer camera unavailable)';camSrc='webcam';camStart();return;}
@@ -1557,6 +1569,18 @@ $('cam').addEventListener('error',()=>{if(!camOn||!$('cam').getAttribute('src'))
   $('camoff').textContent='Webcam unavailable or busy (another viewer).';});
 $('cam').addEventListener('load',()=>{if(camOn){$('camoff').style.display='none';$('cam').style.display='block';}});
 $('camtoggle').addEventListener('click',()=>camOn?camStop():camStart());
+// The station stops a camera after three failed connects; offer a manual reconnect instead of retrying.
+const NOT_RESPONDING='Camera not responding.';
+setInterval(async()=>{if(document.hidden||!(camOn||rcamOn))return;
+  try{const h=await (await fetch('api/camera-health')).json();
+    if(document.body.classList.contains('remote')){
+      if(rcamOn)['bambu','webcam'].forEach(src=>{if(h[src].state==='stopped'&&$('rcam-'+src).getAttribute('src')){$('rcam-'+src).src='';camPaused($('rcamoff-'+src),rcamStart,NOT_RESPONDING);}});
+    }else if(camOn&&h[camSrc].state==='stopped'){camStop();$('camtoggle').textContent='Start';camPaused($('camoff'),camStart,NOT_RESPONDING);}
+  }catch(e){}},5000);
+document.addEventListener('visibilitychange',()=>{
+  if(document.body.classList.contains('remote'))return;
+  if(document.hidden&&camOn){camStop();camHidden=true;}
+  else if(!document.hidden&&camHidden)camStart();});
 
 // tabs: Monitor / Inbox, sharing the status bar above.
 function showTab(name){
@@ -1774,13 +1798,20 @@ $('extend').addEventListener('click',async e=>{e.target.disabled=true;
 if(document.body.classList.contains('remote')){remoteInfo().then(remTick); setInterval(remTick,15000); setInterval(remoteInfo,60000);}
 
 // remote: both cameras side by side, one full-size frame a second each
+function rcamStart(){rcamOn=true;clearTimeout(rcamTimer);rcamTimer=setTimeout(()=>rcamStop(true),CAM_LIMIT);
+  ['bambu','webcam'].forEach(src=>{$('rcamoff-'+src).style.display='none';$('rcam-'+src).src=camUrl(src);});}
+function rcamStop(paused){rcamOn=false;clearTimeout(rcamTimer);
+  ['bambu','webcam'].forEach(src=>{$('rcam-'+src).src='';
+    if(paused)camPaused($('rcamoff-'+src),rcamStart);});}
 function remoteCams(){
   $('rlightslot').appendChild($('light'));
   ['bambu','webcam'].forEach(src=>{const img=$('rcam-'+src), off=$('rcamoff-'+src);
     img.addEventListener('load',()=>{off.style.display='none';});
-    img.addEventListener('error',()=>{off.style.display='flex';
-      setTimeout(()=>{img.src=camUrl(src);},15000);});   // keep retrying while the page is open
-    off.style.display='none'; img.src=camUrl(src);});
+    img.addEventListener('error',()=>{if(!rcamOn||!img.getAttribute('src'))return; img.src='';
+      camPaused(off,rcamStart,NOT_RESPONDING);});});   // manual reconnect only
+  document.addEventListener('visibilitychange',()=>{if(document.hidden){if(rcamOn){rcamStop(false);rcamTimer='hidden';}}
+    else if(rcamTimer==='hidden')rcamStart();});
+  rcamStart();
 }
 
 // click a camera to fill the window; Esc or click again to return

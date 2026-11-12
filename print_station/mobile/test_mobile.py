@@ -185,6 +185,51 @@ class CameraTests(unittest.TestCase):
         self.assertFalse(hub.health('bambu')['running'])
         self.assertFalse(hub.renew(b, 'phone-b'))
 
+    def test_view_limit_ends_renewed_lease(self):
+        class Reader:
+            def read(self):
+                time.sleep(.01)
+                return b'\xff\xd8image\xff\xd9'
+            def close(self): pass
+        now = [0]
+        hub = CameraHub({'bambu': Reader}, lambda: now[0])
+        key = hub.acquire('viewer', 'bambu')
+        self.addCleanup(hub.release, key, 'viewer')
+        for t in range(15, CameraHub.MAX_VIEW, 15):
+            now[0] = t
+            self.assertTrue(hub.renew(key, 'viewer'))
+        now[0] = CameraHub.MAX_VIEW
+        self.assertFalse(hub.renew(key, 'viewer'))
+        self.assertEqual(list(hub.frames(key, 'viewer')), [])
+
+    def test_reader_stops_after_three_failures_until_new_viewer(self):
+        opens = []
+        class Reader:
+            def __init__(self):
+                opens.append(1)
+                raise OSError('port closed')
+        now = [0]
+        hub = CameraHub({'bambu': Reader}, lambda: now[0])
+        a = hub.acquire('a', 'bambu')
+        self.addCleanup(hub.release, a, 'a')
+        deadline = time.monotonic() + 3
+        while hub.health('bambu')['state'] != 'stopped' and time.monotonic() < deadline:
+            now[0] += 1
+            hub.renew(a, 'a')
+            time.sleep(.05)
+        self.assertEqual(hub.health('bambu')['state'], 'stopped')
+        self.assertEqual(len(opens), CameraHub.GIVE_UP)
+        self.assertTrue(hub.renew(a, 'a'))          # renewing does not retry
+        time.sleep(.3)
+        self.assertEqual(len(opens), CameraHub.GIVE_UP)
+        self.assertEqual(list(hub.frames(a, 'a')), [])   # open streams end
+        b = hub.acquire('b', 'bambu')                # Reconnect / refresh
+        self.addCleanup(hub.release, b, 'b')
+        deadline = time.monotonic() + 2
+        while len(opens) <= CameraHub.GIVE_UP and time.monotonic() < deadline:
+            time.sleep(.05)
+        self.assertGreater(len(opens), CameraHub.GIVE_UP)
+
     def test_snapshot_shares_reader_and_requires_new_frame(self):
         closed = threading.Event()
         opens = []

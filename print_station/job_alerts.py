@@ -41,6 +41,14 @@ class JobAlerts:
             state, was = self.s.get('gcode_state'), old.get('gcode_state')
             layer = self.s.get('layer_num') or 0
 
+            if was is None and state in (RUNNING, PAUSED):                 # first report after a restart:
+                err = self.s.get('print_error')                            # adopt the running job silently
+                self.errors = {err} if err not in (None, 0, '0') else set()
+                t = self.s.get('tray_now')
+                self.last_tray = t if t not in NO_TRAY else None
+                self.layer_at, self.stalled = self.clock(), False
+                return
+
             if state == RUNNING and was not in (RUNNING, PAUSED):          # new job
                 self.errors.clear()
                 self.last_tray = self.s.get('tray_now') if self.s.get('tray_now') not in NO_TRAY else None

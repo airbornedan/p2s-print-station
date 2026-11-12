@@ -89,17 +89,21 @@ class WebcamReader:
 
 class CameraHub:
     TTL = 20
+    MAX_VIEW = 600      # a viewer's stream ends after 10 minutes: long sessions are unattended and may wedge the printer camera
+    GIVE_UP = 3         # failed connects in a row before the reader stops; a viewer's Reconnect starts it again
 
     def __init__(self, factories, clock=time.monotonic):
         self.factories, self.clock = factories, clock
         self.cond = threading.Condition(threading.RLock())
         self.leases = {}
-        self.sources = {name: dict(frame=None, at=None, seq=0, running=False, error=None) for name in factories}
+        self.sources = {name: dict(frame=None, at=None, seq=0, running=False, error=None, stopped=False)
+                        for name in factories}
 
     def _prune(self):
         now = self.clock()
         for key in list(self.leases):
-            if self.leases[key]['until'] <= now:
+            lease = self.leases[key]
+            if lease['until'] <= now or now - lease['started'] >= self.MAX_VIEW:
                 del self.leases[key]
 
     def acquire(self, owner, source):
@@ -110,13 +114,15 @@ class CameraHub:
             if len(self.leases) >= 12 or sum(v['owner'] == owner for v in self.leases.values()) >= 2:
                 raise ValueError('Too many camera viewers')
             key = secrets.token_urlsafe(24)
-            self.leases[key] = dict(owner=owner, source=source, until=self.clock() + self.TTL)
+            now = self.clock()
+            self.leases[key] = dict(owner=owner, source=source, until=now + self.TTL, started=now)
+            self.sources[source]['stopped'] = False   # a new viewer (Reconnect, refresh) tries again
             self._ensure(source)
             return key
 
     def _ensure(self, source):
         state = self.sources[source]
-        if not state['running']:
+        if not state['running'] and not state['stopped']:
             state['running'] = True
             threading.Thread(target=self._run, args=(source,), daemon=True).start()
 
@@ -154,11 +160,12 @@ class CameraHub:
             age = None if s['at'] is None else max(0, self.clock() - s['at'])
             return dict(running=s['running'], frame_age_seconds=age,
                         state='live' if s['running'] and age is not None and age < 5 else
+                        'stopped' if s['stopped'] else
                         'unavailable' if s['error'] else 'connecting' if s['running'] else 'off')
 
     def _run(self, source):
         state = self.sources[source]
-        delay = 1
+        delay, failures = 1, 0
         try:
             while self._wanted(source):
                 reader = None
@@ -178,19 +185,24 @@ class CameraHub:
                                     last = self.clock()
                             if frames:
                                 last = self.clock()
-                                delay = 1
+                                delay, failures = 1, 0
                                 with self.cond:
                                     state.update(frame=frames[-1], at=last, seq=state['seq'] + 1, error=None)
                                     self.cond.notify_all()
                         if self.clock() - last > 5:
                             raise TimeoutError('No fresh camera frames')
                 except Exception as exc:
+                    failures += 1
                     with self.cond:
                         state['error'] = type(exc).__name__
                         self.cond.notify_all()
                 finally:
                     if reader:
                         reader.close()
+                if failures >= self.GIVE_UP:
+                    with self.cond:
+                        state['stopped'] = True
+                    break
                 end = self.clock() + delay
                 while self._wanted(source) and self.clock() < end:
                     time.sleep(0.2)
@@ -239,7 +251,7 @@ class CameraHub:
                         lease['until'] = self.clock() + self.TTL
                     s = self.sources[lease['source']]
                     self.cond.wait_for(lambda: s['seq'] != seen or key not in self.leases, timeout=3)
-                    if key not in self.leases:
+                    if key not in self.leases or s['stopped']:
                         return
                     fresh = s['frame'] is not None and self.clock() - s['at'] < 5 and s['seq'] != seen
                     seen = s['seq']
