@@ -7,7 +7,7 @@ from flask import Flask, request, jsonify, render_template, Response, g, send_fr
 from .auth import Devices, COOKIE
 
 
-def create_app(cache, cameras, devices=None, origin='https://print.example.com', push=None):
+def create_app(cache, cameras, devices=None, origin='https://print.example.com', push=None, on_view=None):
     app = Flask(__name__)
     app.config['MAX_CONTENT_LENGTH'] = 4096
     devices = devices or Devices()
@@ -95,6 +95,8 @@ def create_app(cache, cameras, devices=None, origin='https://print.example.com',
 
     @app.get('/api/status')
     def status():
+        if on_view:
+            on_view()   # someone is looking: the station may fetch a fresh report
         return jsonify(cache.snapshot())
 
     @app.post('/api/viewer')

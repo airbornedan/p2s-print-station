@@ -29,16 +29,28 @@ def code():
     return siteconf.get("access_code") or _conf()[1]
 
 
-def connect(on_message=None):
+def connect(on_message=None, on_up=None, on_down=None):
+    """Connect and subscribe to reports. paho reconnects by itself after a drop but forgets the
+    subscription, so subscribe again on every (re)connect. on_up/on_down: optional link callbacks."""
     import paho.mqtt.client as mqtt
     sn = serial()
+    topic = f"device/{sn}/report"
     c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     c.username_pw_set("bblp", code())
     c.tls_set(cert_reqs=ssl.CERT_NONE); c.tls_insecure_set(True)
     if on_message:
         c.on_message = on_message
+
+    def up(client, userdata, flags, reason, props):
+        if not reason.is_failure:
+            client.subscribe(topic)
+            if on_up:
+                on_up()
+    c.on_connect = up
+    if on_down:
+        c.on_disconnect = lambda client, userdata, flags, reason, props: on_down()
     c.connect(IP, MQTT_PORT, 20)
-    c.subscribe(f"device/{sn}/report")
+    c.subscribe(topic)
     return c, sn
 
 
@@ -51,3 +63,10 @@ def sequence_id():
 def request(c, sn, payload):
     import json as _j
     c.publish(f"device/{sn}/request", _j.dumps(payload))
+
+
+def tray_clear(tray):
+    """True for a clear/translucent spool: colour alpha below FF (clear PETG reports 00000000) or a name saying so."""
+    col = (tray.get("tray_color") or "").upper()
+    name = (tray.get("tray_sub_brands") or "").lower()
+    return (len(col) == 8 and col[6:] != "FF") or any(w in name for w in ("translucent", "clear", "transparent"))

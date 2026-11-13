@@ -22,6 +22,7 @@ import slicecheck  # noqa: E402
 from plate_watchdog import PrintMonitor
 from job_alerts import JobAlerts
 from status_cache import StatusCache
+from link_policy import LinkPolicy
 from camera_relay import CameraHub, FFmpegReader, WebcamReader
 import parts as plate_parts
 from stick_cleanup import StickCleanup
@@ -44,6 +45,7 @@ _state = {"print": {}, "connected": False, "error": None, "updated": 0.0, "ams_u
 _conn = {"c": None, "sn": None}   # live MQTT client, so a send can ask for a fresh report
 _lock = threading.Lock()
 _reconnect = threading.Event()   # set to force the MQTT loop to drop and reconnect (e.g. new LAN code)
+_link = LinkPolicy()
 
 
 _print_monitor = PrintMonitor()
@@ -75,6 +77,8 @@ def _job_alert_ticker():
         time.sleep(30)
         try:
             _job_alerts.tick()
+            if _link.lost(time.time()):
+                _ntfy("Lost contact with the printer during a print; still trying to reconnect.")
         except Exception as e:
             print("job alert tick failed:", e, file=sys.stderr)
 
@@ -90,6 +94,7 @@ def _on_message(c, u, m):
         return
     if not p:
         return
+    _link.observe(p, time.time())
     with _lock:
         _state["print"].update(p)        # reports are incremental; merge
         _state["updated"] = time.time()
@@ -102,27 +107,37 @@ def _on_message(c, u, m):
     _stick_cleanup.observe(p)
 
 
+def _set_link(up):
+    _mobile_status.connection(up)
+    with _lock:
+        _state["connected"] = up
+
+
 def _mqtt_loop():
-    """Connect once, keep the state fresh, re-poll periodically, reconnect on drop or on request."""
+    """Stay connected and subscribed. Ask for reports only during a job or when a viewer wants fresh
+    data (LinkPolicy); reconnect if a job's reports stop, on a dropped link, or on request (new LAN code)."""
     while True:
         c = None
         try:
-            c, sn = p2s.connect(_on_message)
+            c, sn = p2s.connect(_on_message, on_up=lambda: _set_link(True), on_down=lambda: _set_link(False))
             c.loop_start()
             _conn.update(c=c, sn=sn)
-            _mobile_status.connection(True)
+            _set_link(True)
             with _lock:
-                _state["connected"], _state["error"] = True, None
+                _state["error"] = None
+            _link.connected(time.time())
             p2s.request(c, sn, {"pushing": {"sequence_id": "0", "command": "pushall"}})
             while True:
-                # the printer pushes incremental updates while printing; a periodic pushall
-                # keeps temps/idle state current and detects a dead link. Wake early if a new
-                # LAN code was entered so we reconnect with it.
-                _mobile_status.connection(c.is_connected())
-                if _reconnect.wait(4):
+                if _reconnect.wait(2):
                     _reconnect.clear()
                     break
-                p2s.request(c, sn, {"pushing": {"sequence_id": "0", "command": "pushall"}})
+                now = time.time()
+                if _link.stale(now):
+                    print("printer reports stopped during a job; reconnecting", file=sys.stderr)
+                    break
+                if _link.poll_due(now):
+                    p2s.request(c, sn, {"pushing": {"sequence_id": "0", "command": "pushall"}})
+                    _link.polled(now)
         except Exception as e:
             _conn.update(c=None, sn=None)
             _mobile_status.connection(False)
@@ -312,6 +327,8 @@ def api_code():
 
 @app.get("/api/status")
 def api_status():
+    if request.args.get("refresh"):          # a person is looking (web page): fetch fresh data if it's old
+        _link.demand(time.time())
     with _lock:
         p = dict(_state["print"])
         meta = {"connected": _state["connected"], "error": _state["error"],
@@ -330,7 +347,7 @@ def api_status():
                 name = "empty"
             ams.append({"unit": unit.get("id"), "slot": t.get("id"), "type": typ or None,
                         "idx": t.get("tray_info_idx"), "name": name, "color": "#" + col if col else None,
-                        "remain": t.get("remain")})
+                        "clear": p2s.tray_clear(t), "remain": t.get("remain")})
     stage = _mobile_status.snapshot()
     out = {
         "stage": stage["stage"], "stage_code": stage["stage_code"],
@@ -1000,12 +1017,25 @@ def _tray_identity(slot):
         for t in unit.get("tray", []):
             if str(t.get("id")) == str(slot):
                 return {"type": t.get("tray_type") or None, "idx": t.get("tray_info_idx") or None,
-                        "color": (t.get("tray_color") or "")[:6].upper() or None}
+                        "color": (t.get("tray_color") or "")[:8].upper() or None}
     return None
 
 
+def _same_tray(expect, now):
+    """Slot identity match; colour includes alpha (clear vs solid). Older slices stored 6-digit colours."""
+    if not expect or not now:
+        return expect == now
+    e, n = expect.get("color") or "", now.get("color") or ""
+    if len(e) == 6:
+        n = n[:6] + ("" if len(n) < 8 or n[6:] == "FF" else "/" + n[6:])   # an older slice never matches a clear spool
+    return (expect.get("type"), expect.get("idx"), e) == (now.get("type"), now.get("idx"), n)
+
+
 def _tray_desc(t):
-    return "empty" if not t or not t.get("type") else "%s %s #%s" % (t["type"], t.get("idx") or "?", t.get("color") or "?")
+    if not t or not t.get("type"):
+        return "empty"
+    col = t.get("color") or "?"
+    return "%s %s #%s%s" % (t["type"], t.get("idx") or "?", col[:6], " clear" if len(col) == 8 and col[6:] != "FF" else "")
 
 
 USB_MARGIN_MB = 50                     # free space kept on the USB stick beyond the file being sent
@@ -1096,7 +1126,7 @@ def _send_problems(path, slot, expect=None, fresh=False, allow_runout=False, all
             probs.append("Low filament: ~%d g left, needs %.1f g. Tick 'Let it run out' to print anyway." % (rem * 10, want["grams"]))
     if slot is not None and expect is not None:
         now = _tray_identity(slot)
-        if now != expect:
+        if not _same_tray(expect, now):
             probs.append("AMS slot %s changed since slicing (was %s, now %s). Re-slice." % (slot, _tray_desc(expect), _tray_desc(now)))
     return probs
 
@@ -1306,6 +1336,7 @@ main{max-width:1200px;margin:0 auto;padding:16px}
 .slots{display:grid;gap:8px}
 .slot{display:flex;align-items:center;gap:10px;font-size:13px}
 .sw{width:16px;height:16px;border-radius:4px;border:1px solid #0006;flex:0 0 auto}
+.sw.clear{background:repeating-conic-gradient(#ddd 0 25%,#888 0 50%) 0 0/8px 8px}
 .btns{display:flex;gap:10px;flex-wrap:wrap}
 button{font:inherit;color:var(--fg);background:#2a3140;border:1px solid var(--line);border-radius:9px;
        padding:10px 16px;cursor:pointer}
@@ -1507,7 +1538,7 @@ function temps(c,t){c=c==null?'—':Math.round(c); t=t==null?0:Math.round(t);
   return t>0? c+' → '+t+'°C' : c+'°C';}
 let last={};
 async function tick(){
-  let d; try{ d=await (await fetch('api/status')).json(); }catch(e){ return; }
+  let d; try{ d=await (await fetch('api/status?refresh=1')).json(); }catch(e){ return; }
   last=d;
   const m=d.meta||{};
   $('link').className='dot '+(m.connected?'on':'off');
@@ -1529,8 +1560,8 @@ async function tick(){
   $('usb').textContent=!d.sdcard?'none':(d.usb_free_mb!=null?(d.usb_free_mb/1024).toFixed(1)+' GB free':'present')+(d.recording?' — video recording ON, fills the stick':'');
   const s=$('slots'); s.innerHTML='';
   (d.ams||[]).forEach(a=>{const row=document.createElement('div');row.className='slot';
-    row.innerHTML='<span class="sw" style="background:'+(a.color||'#444')+'"></span>'+
-      '<b>slot '+a.slot+'</b> '+(a.name||'empty')+
+    row.innerHTML=swatch(a)+
+      '<b>slot '+a.slot+'</b> '+slotName(a)+
       ' <span class="muted">· '+(a.remain==null||a.remain<0?'?':a.remain+'%')+' left</span>';
     s.appendChild(row);});
   const running=(st==='RUNNING'), paused=(st==='PAUSE');
@@ -1726,8 +1757,8 @@ let place={x:128,y:128,rot:0}, foot=null, curNozzle='0.4', drag=null;
 function amsPickHTML(){
   return '<div class="amspick" id="amsslot">'+(last.ams||[]).map(a=>
     '<div class="arow'+(a.type?'':' off')+'" data-slot="'+a.slot+'">'+
-      '<span class="sw" style="background:'+(a.color||'#444')+'"></span>'+
-      '<span>slot '+a.slot+' · '+(a.name||'empty')+'</span>'+
+      swatch(a)+
+      '<span>slot '+a.slot+' · '+slotName(a)+'</span>'+
       '<span class="meta">'+(a.remain!=null&&a.remain>=0?a.remain+'%':'')+'</span></div>').join('')+'</div>';
 }
 function wireAms(){
@@ -1788,6 +1819,8 @@ async function selectFile(it){
   $('slicebtn').addEventListener('click',()=>doSlice(it.name));
 }
 
+function swatch(a){return a.clear?'<span class="sw clear" title="clear"></span>':'<span class="sw" style="background:'+(a.color||'#444')+'"></span>';}
+function slotName(a){return (a.name||'empty')+(a.clear&&!/translucent|clear|transparent/i.test(a.name||'')?' (clear)':'');}
 function slotColor(slot){const a=(last.ams||[]).find(x=>+x.slot===+slot); return a?a.color:null;}
 function checksHTML(checks){ return (checks||[]).map(c=>
   '<div class="chk-line '+(c.ok?'ok':'bad')+'">'+(c.ok?'✓':'✕')+' '+esc(c.msg)+'</div>').join(''); }
@@ -1952,7 +1985,7 @@ if __name__ == "__main__":
     if siteconf.get("mobile_enabled"):
         from mobile.app import create_app
         mobile_app = create_app(_mobile_status, _cameras, devices=_mobile_devices, push=_mobile_push,
-                                origin=siteconf.get("mobile_origin"))
+                                origin=siteconf.get("mobile_origin"), on_view=lambda: _link.demand(time.time()))
         mobile_server = make_server("127.0.0.1", 8080, mobile_app, threaded=True)
         threading.Thread(target=mobile_server.serve_forever, daemon=True).start()
     app.run(host="0.0.0.0", port=PORT, threaded=True)

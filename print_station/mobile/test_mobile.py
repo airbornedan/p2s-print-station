@@ -132,6 +132,17 @@ class MobileTests(unittest.TestCase):
 
 
 class CacheTests(unittest.TestCase):
+    def test_clear_spool_flagged_privately(self):
+        from json_status.schema import clean
+        cache = StatusCache(lambda: 100)
+        cache.observe(dict(gcode_state='IDLE', ams={'ams': [dict(id='0', tray=[
+            dict(id='0', tray_type='PETG', tray_sub_brands='PETG Translucent', tray_color='00000000'),
+            dict(id='3', tray_type='PLA', tray_sub_brands='PLA Basic', tray_color='000000FF')])]}))
+        slots = cache.snapshot()['ams']
+        self.assertEqual([s['clear'] for s in slots], [True, False])
+        self.assertEqual([s['color'] for s in slots], ['#000000', '#000000'])
+        self.assertNotIn('clear', clean(dict(cache.data))['ams'][0])   # public JSON schema unchanged
+
     def test_independent_freshness_and_unknowns(self):
         now = [100]
         cache = StatusCache(lambda: now[0])

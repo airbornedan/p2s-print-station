@@ -24,5 +24,6 @@ print("nozzle %s/%s C  bed %s/%s C  nozzle size %s  sdcard(USB) %s" % (p.get("no
       p.get("nozzle_diameter"), p.get("sdcard")))
 for unit in (p.get("ams") or {}).get("ams", []):
     for t in unit.get("tray", []):
-        print("  AMS %s slot %s: %s %s #%s remain %s%%" % (unit.get("id"), t.get("id"), t.get("tray_type"),
-              t.get("tray_info_idx"), (t.get("tray_color") or "")[:6], t.get("remain")))
+        print("  AMS %s slot %s: %s %s #%s%s remain %s%%" % (unit.get("id"), t.get("id"), t.get("tray_type"),
+              t.get("tray_info_idx"), (t.get("tray_color") or "")[:6], " clear" if p2s.tray_clear(t) else "",
+              t.get("remain")))

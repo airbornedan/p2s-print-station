@@ -1,8 +1,12 @@
 """Timestamped observations for the read-only mobile boundary."""
+import os
+import sys
 import threading
 import time
 from json_status.schema import clean
 from printer_stage import stage_label
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tools', 'bambu'))
+from p2s import tray_clear  # noqa: E402
 
 
 class StatusCache:
@@ -42,7 +46,7 @@ class StatusCache:
                     for tray in unit.get('tray', []):
                         slots.append(dict(unit=unit.get('id'), slot_index=tray.get('id'),
                             material=tray.get('tray_type'), name=tray.get('tray_sub_brands'),
-                            color='#' + (tray.get('tray_color') or '')[:6],
+                            color='#' + (tray.get('tray_color') or '')[:6], clear=tray_clear(tray),
                             remaining_percent=tray.get('remain')))
                 self.data['ams'] = slots
                 self.data['ams_observed_at_unix'] = self.clock()
@@ -56,6 +60,9 @@ class StatusCache:
             doc = clean(dict(self.data, generated_at_unix=self.clock()))
             # Private mobile-only field; never change the public JSON schema.
             doc['filename'] = self.data.get('filename')
+            clear = {(s.get('unit'), s.get('slot_index')): s.get('clear') for s in self.data.get('ams', [])}
+            for s in doc['ams']:
+                s['clear'] = bool(clear.get((str(s['unit']), str(s['slot_index'])), clear.get((s['unit'], s['slot_index']))))
             age = self.clock() - self.stage_observed if self.stage_observed is not None else None
             fresh = (self.connected and age is not None and 0 <= age <= 30
                      and self.data.get('state') in {'RUNNING', 'PREPARE', 'SLICING', 'PAUSE'})
