@@ -40,7 +40,7 @@ The LAN access code is a credential; never commit it. Read from `$P2S_ACCESS_COD
 - `upload.py part.gcode.3mf`: copy to the USB stick.
 - `start.py <name.gcode.3mf> <ams_slot 0-3> [url] [--vibration]`: start a file on the stick; vibration calibration only with `--vibration`.
 - `status.py`, `hms.py`: state, temperatures, AMS, errors.
-- `control.py {stop|pause|resume|light_on|light_off}`
+- `control.py {stop|pause|resume|light_on|light_off|silent|standard|sport|ludicrous}`: speed names set the print speed level.
 - `cam.py {snap out.jpg | clip <secs> out.mp4}`
 - `clear_and_check.py`: stop and clear an error.
 - `gcodecheck.py part.gcode.3mf`: checks the start G-code has the AMS load, bed leveling and nozzle heat (an incomplete machine profile drops them). The station and `start.py --local` refuse a file that fails.

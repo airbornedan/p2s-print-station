@@ -91,6 +91,8 @@ class CameraHub:
     TTL = 20
     MAX_VIEW = 600      # a viewer's stream ends after 10 minutes: long sessions are unattended and may wedge the printer camera
     GIVE_UP = 3         # failed connects in a row before the reader stops; a viewer's Reconnect starts it again
+    FIRST_FRAME = 15    # seconds to wait for the first frame (the printer camera takes about 7 s to start)
+    STALL = 5           # seconds without a frame, once streaming, before reconnecting
 
     def __init__(self, factories, clock=time.monotonic):
         self.factories, self.clock = factories, clock
@@ -174,6 +176,7 @@ class CameraHub:
                     buf = b''
                     skip = getattr(reader, 'skip_frames', 0)
                     last = self.clock()
+                    limit = self.FIRST_FRAME
                     while self._wanted(source):
                         chunk = reader.read()
                         if chunk:
@@ -185,11 +188,12 @@ class CameraHub:
                                     last = self.clock()
                             if frames:
                                 last = self.clock()
+                                limit = self.STALL
                                 delay, failures = 1, 0
                                 with self.cond:
                                     state.update(frame=frames[-1], at=last, seq=state['seq'] + 1, error=None)
                                     self.cond.notify_all()
-                        if self.clock() - last > 5:
+                        if self.clock() - last > limit:
                             raise TimeoutError('No fresh camera frames')
                 except Exception as exc:
                     failures += 1

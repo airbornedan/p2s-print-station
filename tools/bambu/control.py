@@ -1,5 +1,5 @@
 """Send one control command to the P2S. LAN + Developer mode only (cloud mode answers "verify failed").
-    P2S_ACCESS_CODE=<lan code> python3 control.py {stop|pause|resume|light_on|light_off}"""
+    P2S_ACCESS_CODE=<lan code> python3 control.py {stop|pause|resume|light_on|light_off|silent|standard|sport|ludicrous}"""
 import json, sys, time, p2s
 CMDS = {
     "stop":   {"print": {"command": "stop", "param": ""}},
@@ -10,6 +10,8 @@ CMDS = {
     "light_off": {"system": {"command": "ledctrl", "led_node": "chamber_light", "led_mode": "off",
                              "led_on_time": 500, "led_off_time": 500, "loop_times": 0, "interval_time": 0}},
 }
+for i, name in enumerate(("silent", "standard", "sport", "ludicrous"), 1):      # print speed levels
+    CMDS[name] = {"print": {"command": "print_speed", "param": str(i)}}
 cmd = sys.argv[1]
 seq = p2s.sequence_id()
 payload = CMDS[cmd]; next(iter(payload.values()))["sequence_id"] = seq
