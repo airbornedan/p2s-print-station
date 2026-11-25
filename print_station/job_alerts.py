@@ -72,7 +72,7 @@ class JobAlerts:
                 self._tell('printer error %s at layer %s.' % (err, self._layer()), 5)
 
             if state in ENDED and was in (RUNNING, PAUSED):
-                self._tell('finished. Clear the bed.' if state == 'FINISH' else 'stopped or failed at layer %s.' % self._layer(),
+                self._tell('finished.' if state == 'FINISH' else 'stopped or failed at layer %s.' % self._layer(),
                            3 if state == 'FINISH' else 5)
 
     def tick(self):
