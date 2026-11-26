@@ -1,0 +1,10 @@
+[Unit]
+Description=Announce the P2S to Bambu Studio on this machine (LAN discovery)
+
+[Service]
+ExecStart=/usr/bin/python3 %h/Projects/print-station/tools/bambu/ssdp_announce.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
