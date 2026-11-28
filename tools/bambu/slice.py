@@ -26,6 +26,8 @@ def main():
     ap.add_argument("--quality")
     ap.add_argument("--filament")
     ap.add_argument("--allow-warnings", action="store_true")
+    ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                    help="override a process setting, e.g. --set sparse_infill_density=0%% (repeatable)")
     ap.add_argument("--keep-position", action="store_true",
                     help="slice the STL where it is (plate mm, origin front-left) instead of auto-arranging; "
                          "auto-arrange keeps parts farther from the edges when supports are on, so big parts fail")
@@ -43,6 +45,11 @@ def main():
                     support_on_build_plate_only="1" if a.supports == "plate" else "0")
         if a.supports == "slim":
             proc.update(support_style="tree_slim")
+    for kv in a.set:
+        k, _, v = kv.partition("=")
+        if k not in proc:
+            sys.exit("unknown process setting: %s" % k)
+        proc[k] = v
     if a.brim == "outer":
         proc.update(brim_type="outer_only", brim_width="5")
     elif a.brim == "none":

@@ -43,9 +43,10 @@ The LAN access code is a credential; never commit it. Read from `$P2S_ACCESS_COD
 - `control.py {stop|pause|resume|light_on|light_off|silent|standard|sport|ludicrous}`: speed names set the print speed level.
 - `cam.py {snap out.jpg | clip <secs> out.mp4}`
 - `clear_and_check.py`: stop and clear an error.
+- `gcode.py <file.gcode> [--yes]`: send G-code lines (e.g. Bambu's purge-chute offset files); idle printer only; shows the lines without `--yes`; logs to `~/.local/share/print_station/gcode_sent.log`.
 - `gcodecheck.py part.gcode.3mf`: checks the start G-code has the AMS load, bed leveling and nozzle heat (an incomplete machine profile drops them). The station and `start.py --local` refuse a file that fails.
 - `estimate.py parts.toml`: sliced filament estimates and a print-requirements table for a project (format in the docstring). Stops on a slicer warning unless the job has `allow_warnings = true`.
-- `slice.py part.stl out.gcode.3mf --supports off|tree|plate`: slices with the station's profiles; `--supports` is required. Writes nothing on a slicer warning (e.g. "floating cantilever") unless `--allow-warnings`. `--keep-position` slices the STL where it is (plate mm) instead of auto-arranging; needed for big parts with supports, which auto-arrange refuses.
+- `slice.py part.stl out.gcode.3mf --supports off|tree|plate [--set key=value ...]`: slices with the station's profiles; `--supports` is required; `--set` overrides a process setting (e.g. `wall_loops=6`). Never `sparse_infill_density=0%`: the slicer then drops solid top and bottom layers too, leaving open ends; use 10% or more. Writes nothing on a slicer warning (e.g. "floating cantilever") unless `--allow-warnings`. `--keep-position` slices the STL where it is (plate mm) instead of auto-arranging; needed for big parts with supports, which auto-arrange refuses.
 - `slicecheck.py part.gcode.3mf`: the slicer's warnings for an already-sliced file (re-slices its model).
 
 ## Printer quirks
