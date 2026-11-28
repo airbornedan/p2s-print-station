@@ -2,15 +2,23 @@
 
     python3 slice.py part.stl out.gcode.3mf --supports off|tree|slim|plate [--brim auto|outer|none]
                      [--nozzle 0.4] [--quality "0.20mm Standard @BBL P2S"] [--filament "Generic PLA @BBL P2S"]
-                     [--allow-warnings]
+                     [--allow-warnings] [--place X,Y | --keep-position] [--allow-center]
 
 --supports is required: the choice is made on purpose, never by default. If the slicer warns (e.g. "floating
 cantilever ... enable support generation") no file is written and the exit status is 2, unless
 --allow-warnings. Prints grams, minutes and any warnings.
+
+Placement: the plate's center is worn and parts printed there can come loose, so by default the part goes
+to a quadrant beside it (the next quadrant each time). --place X,Y puts the footprint's center at plate
+mm X,Y (origin front-left); --keep-position slices the STL where it is. Only a part too big to keep off
+the center is left to the slicer's auto-arrange. A slice whose footprint (brim included) touches the
+center circle (centre_keepout_mm, 30 mm radius) when it could fit beside it is refused unless
+--allow-center.
 """
 import argparse, json, os, shutil, subprocess, sys, tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import placement  # noqa: E402
 import siteconf  # noqa: E402
 import slicecheck  # noqa: E402
 from estimate import flatten  # noqa: E402
@@ -29,8 +37,9 @@ def main():
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                     help="override a process setting, e.g. --set sparse_infill_density=0%% (repeatable)")
     ap.add_argument("--keep-position", action="store_true",
-                    help="slice the STL where it is (plate mm, origin front-left) instead of auto-arranging; "
-                         "auto-arrange keeps parts farther from the edges when supports are on, so big parts fail")
+                    help="slice the STL where it is (plate mm, origin front-left)")
+    ap.add_argument("--place", metavar="X,Y", help="put the footprint's center at plate mm X,Y (origin front-left)")
+    ap.add_argument("--allow-center", action="store_true", help="allow a footprint on the worn plate center")
     a = ap.parse_args()
     suffix = "" if a.nozzle == "0.4" else " %s nozzle" % a.nozzle
     machine = "Bambu Lab P2S %s nozzle" % a.nozzle
@@ -54,14 +63,34 @@ def main():
         proc.update(brim_type="outer_only", brim_width="5")
     elif a.brim == "none":
         proc.update(brim_type="no_brim")
+    radius = siteconf.get("centre_keepout_mm") or 0
+    state = siteconf.path("state_dir")
     with tempfile.TemporaryDirectory() as tmp:
         pj, out = os.path.join(tmp, "process.json"), os.path.join(tmp, "out.gcode.3mf")
+        model, arrange, next_spot = os.path.abspath(a.stl), "1", None
+        if a.keep_position:
+            arrange = "0"
+        else:
+            tris = placement.load_tris(a.stl)
+            if a.place:
+                x, _, y = a.place.partition(",")
+                spot = (float(x), float(y))
+            else:
+                spot, next_spot = placement.pick_spot(tris, radius, placement.next_start(state))
+            if spot:
+                moved = placement.move(tris, *spot)
+                if not placement.on_plate(placement.bbox(moved)):
+                    sys.exit("part runs off the plate at %g,%g" % spot)
+                model, arrange = os.path.join(tmp, "placed.stl"), "0"
+                placement.write_stl(model, moved)
+            else:
+                print("too big to keep off the plate center; the slicer arranges it")
         with open(pj, "w") as f:
             json.dump(proc, f)
-        r = subprocess.run([siteconf.path("appimage"), "--slice", "0", "--arrange", "0" if a.keep_position else "1", "--orient", "0",
+        r = subprocess.run([siteconf.path("appimage"), "--slice", "0", "--arrange", arrange, "--orient", "0",
                             "--load-settings", "%s;%s" % (os.path.join(prof, machine + ".json"), pj),
                             "--load-filaments", os.path.join(prof, filament + ".json"),
-                            "--export-3mf", out, os.path.abspath(a.stl)],
+                            "--export-3mf", out, model],
                            capture_output=True, text=True, timeout=600, cwd=tmp)
         warns, err = slicecheck.read_result(os.path.join(tmp, "result.json"))
         if err or not os.path.isfile(out):
@@ -74,6 +103,15 @@ def main():
             print("SLICER WARNING:", w)
         if warns and not a.allow_warnings:
             sys.exit("not written: fix the warning (supports/orientation) or pass --allow-warnings")
+        b = placement.sliced_bbox(out)
+        if b:
+            print("on the plate: x %.0f-%.0f, y %.0f-%.0f mm (brim included; origin front-left)" % (b[0], b[2], b[1], b[3]))
+        centre = placement.centre_problem(b, placement.PLATE, radius)
+        if centre and not a.allow_center:
+            sys.exit("not written: the print sits on the worn plate center (within %d mm); "
+                     "use --place X,Y, or --allow-center to override" % radius)
+        if next_spot is not None:
+            placement.save_start(state, next_spot)
         shutil.copyfile(out, a.out)
         print("wrote", a.out)
 
